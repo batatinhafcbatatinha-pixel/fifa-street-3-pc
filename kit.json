@@ -1,0 +1,38 @@
+{
+  "repo": "fifa-street-3-pc",
+  "game": "FIFA Street 3",
+  "revision": "Xbox 360, USA, TitleID 4541083B",
+  "required_files": {
+    "default.xex": "1b4cd0fd2973fdea5f4f8b4907c6db67fb061c4173193c22144dd027b0a5d792"
+  },
+  "required_paths": [
+    "data"
+  ],
+  "project_dir": "project",
+  "manifest": "fifastreet3_manifest.toml",
+  "target": "fifastreet3",
+  "extra_targets": [],
+  "copy": [
+    "project"
+  ],
+  "ffmpeg_dest": "project/third_party/ffmpeg/include",
+  "play_args": [],
+  "sdk": {
+    "version": "0.10.0.24-dev.gbd833a2 (nightly 2026-10-02)",
+    "url": "https://github.com/rexglue/rexglue-sdk/releases/download/nightly-20261002-bd833a2a/rexglue-sdk-0.10.0.24-dev.gbd833a2-win-amd64.zip",
+    "sha256": "1e19d7ec9be0d9d7e1a0088a34a33b068d4dea520181e81318528ef3b37627e7",
+    "folder": "win-amd64",
+    "patches": [
+      {
+        "name": "rexglue-fpscr-mask",
+        "file": "include/rex/ppc/context.h",
+        "old": "  inline void setcsr(uint32_t csr) noexcept { Platform::setcsr(csr); }\n",
+        "new": "  // Port patch: never let a stale/zero cached csr unmask host FP exceptions\n  // (guest threads whose csr was never seeded hit STATUS_FLOAT_INEXACT_RESULT).\n  inline void setcsr(uint32_t value) noexcept {\n    Platform::InitHostExceptions(value);\n    csr = value;\n    Platform::setcsr(value);\n  }\n"
+      }
+    ]
+  },
+  "ffmpeg": {
+    "commit": "0604b464c7cb4ebc94940cf1f324a3b26b87717c",
+    "url": "https://codeload.github.com/wmarti/FFmpeg/tar.gz/0604b464c7cb4ebc94940cf1f324a3b26b87717c"
+  }
+}
