@@ -446,15 +446,11 @@ struct Renderer::Impl {
     if (!fxc) return false;
     compile = reinterpret_cast<pD3DCompile>(GetProcAddress(fxc, "D3DCompile"));
     if (!compile) return false;
-    // PC settings: graphics card chosen in the settings menu (null = Windows default).
+    // PC settings: graphics API (Direct3D 11 or Vulkan) and card chosen in the settings menu.
     pcs::Configure(PcGameInfo(), false);
-    IDXGIAdapter1* adapter = pcs::Adapter();
-    D3D_FEATURE_LEVEL levels[] = {D3D_FEATURE_LEVEL_11_1};
     ComPtr<ID3D11Device> d;
     ComPtr<ID3D11DeviceContext> c;
-    HRESULT hr = D3D11CreateDevice(adapter, adapter ? D3D_DRIVER_TYPE_UNKNOWN : D3D_DRIVER_TYPE_HARDWARE, nullptr,
-                                   0, levels, 1, D3D11_SDK_VERSION, &d, nullptr, &c);
-    if (adapter) adapter->Release();
+    HRESULT hr = pcs::CreateDevice(0, &d, &c);
     scale = pcs::ResolutionScale();
     if (scale != 1.0f) REXLOG_INFO("[native-gfx] internal resolution x{:.3f}", scale);
     if (FAILED(hr)) {

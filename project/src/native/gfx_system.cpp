@@ -14,6 +14,7 @@
 #include <rex/ui/windowed_app_context.h>
 
 #include "renderer.h"
+#include "../pc_settings.h"
 
 namespace fs3gfx {
 
@@ -58,13 +59,11 @@ X_STATUS NativeGraphicsSystem::SetupGuestGpu(rex::runtime::FunctionDispatcher* f
   vblank_running_ = true;
   vblank_thread_ = rex::system::object_ref<rex::system::XHostThread>(
       new rex::system::XHostThread(kernel_state_, 128 * 1024, 0, [this]() {
-        rex::system::X_VIDEO_MODE mode;
-        rex::kernel::xboxkrnl::VdQueryVideoMode(&mode);
-        double hz = std::max(1.0, double(float(mode.refresh_rate)));
-        auto period = std::chrono::duration_cast<std::chrono::steady_clock::duration>(
-            std::chrono::duration<double>(1.0 / hz));
-        auto next = std::chrono::steady_clock::now() + period;
+        auto next = std::chrono::steady_clock::now();
         while (vblank_running_) {
+          // The rate can change while playing (settings menu): read it every tick.
+          auto period = std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+              std::chrono::duration<double>(1.0 / pcs::GuestRefreshHz()));
           auto now = std::chrono::steady_clock::now();
           if (now >= next) {
             DispatchInterrupt(0, 2);

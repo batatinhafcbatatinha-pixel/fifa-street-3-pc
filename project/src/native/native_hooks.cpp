@@ -15,6 +15,7 @@
 #include "generated/default/fifastreet3_init.h"
 #include "gfx_system.h"
 #include "renderer.h"
+#include "../pc_settings.h"
 
 REX_EXTERN(__imp__sub_82507AE8);  // CreateVertexShader(container) -> object
 REX_EXTERN(__imp__sub_825079D8);  // CreatePixelShader(container) -> object
@@ -30,13 +31,14 @@ using fs3gfx::Renderer;
 
 namespace {
 
-// Holds the flip to the presentation interval (in 60 Hz vertical blanks), as the display would.
+// Holds the flip to the presentation interval (in vertical blanks, 60 Hz on the console), as the
+// display would.
 // With the D3D library in GPU-less mode nothing else waits for the vertical blank.
 void PaceFlip(uint32_t interval) {
   using clock = std::chrono::steady_clock;
   static clock::time_point next = clock::now();
   if (!interval) return;
-  const auto period = std::chrono::duration_cast<clock::duration>(std::chrono::duration<double>(interval / 60.0));
+  const auto period = std::chrono::duration_cast<clock::duration>(std::chrono::duration<double>(interval / pcs::GuestRefreshHz()));
   next += period;
   auto now = clock::now();
   if (next <= now) {
@@ -117,6 +119,13 @@ REX_HOOK_RAW(sub_8250A6B0) {
   Renderer::Get().SignalFences(base, device);
   int32_t mode = int32_t(rex::memory::load_and_swap<uint32_t>(rex::memory::GuestPtr(base, device + 0x350C)));
   uint32_t interval = (mode == 0 || mode == 1) ? 1 : mode == 2 ? 2 : mode == 4 ? 3 : mode == INT32_MIN ? 0 : 1;
+  static int32_t logged_mode = -12345;
+  static int mode_logs = 0;
+  if (mode != logged_mode && mode_logs < 40) {
+    ++mode_logs;
+    logged_mode = mode;
+    REXLOG_INFO("[native-gfx] presentation interval mode {} -> {} vblank(s)", mode, interval);
+  }
   uint32_t flags = (rex::memory::load_and_swap<uint32_t>(rex::memory::GuestPtr(base, device + 0x2E44)) >> 23) & 0x7F;
   rex::CallFrame frame(ctx);
   frame.ctx.r3.u64 = (front & 0xFFFFF000u) | (interval << 8) | flags;

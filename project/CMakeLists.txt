@@ -38,3 +38,19 @@ target_include_directories(fifastreet3 PRIVATE third_party/ffmpeg/include)
 # Offline check of the Xenos -> HLSL translator (compiles the extracted shaders with FXC).
 add_executable(fs3_shader_test tools/shader_test.cpp src/native/xenos_hlsl.cpp)
 target_link_libraries(fs3_shader_test PRIVATE rex::runtime)
+
+# Vulkan option of the settings menu: DXVK's d3d11.dll/dxgi.dll in vulkan\ next to the
+# executable (pc_settings.cpp loads them by full path when "API grafica" is Vulkan).
+set(DXVK_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../third_party/dxvk-3.1.1" CACHE PATH
+    "DXVK release for Windows (x64/d3d11.dll, x64/dxgi.dll, LICENSE)")
+if(WIN32 AND EXISTS "${DXVK_DIR}/x64/d3d11.dll")
+    add_custom_command(TARGET fifastreet3 POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:fifastreet3>/vulkan"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different "${DXVK_DIR}/x64/d3d11.dll" "${DXVK_DIR}/x64/dxgi.dll"
+                "$<TARGET_FILE_DIR:fifastreet3>/vulkan/")
+    if(EXISTS "${DXVK_DIR}/LICENSE")
+        add_custom_command(TARGET fifastreet3 POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different "${DXVK_DIR}/LICENSE"
+                    "$<TARGET_FILE_DIR:fifastreet3>/vulkan/LICENSE.dxvk.txt")
+    endif()
+endif()

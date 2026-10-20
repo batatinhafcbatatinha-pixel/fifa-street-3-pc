@@ -84,7 +84,7 @@ The keyboard and an Xbox controller work at the same time. Skill moves, modifier
 
 ## Settings
 
-Xbox controllers work as on the console. **F1** opens the PC settings over the game (display mode, internal resolution, VSync, frame limit, FXAA, anisotropic filtering, volume, FPS counter); **Alt + Enter** or **F11** toggles fullscreen. Settings are saved in `fifastreet3-pc.ini`. Runtime options of the SDK can be passed after `play.py`, for example `python tools/play.py --game-files game_files --fullscreen=true`.
+Xbox controllers work as on the console. **F1** opens the PC settings over the game (display mode, internal resolution, VSync, frame limit, FXAA, anisotropic filtering, volume, FPS counter); **Alt + Enter** or **F11** toggles fullscreen. Settings are saved in `fifastreet3-pc.ini`. **Graphics API**: DirectX 11, or Vulkan through DXVK (restart); if something looks wrong or stutters, try the other one. **Frame rate**: 60 fps (original) or 30 fps; this game advances one step per frame, so higher rates would speed it up.  Runtime options of the SDK can be passed after `play.py`, for example `python tools/play.py --game-files game_files --fullscreen=true`.
 
 ## Credits and licenses
 
