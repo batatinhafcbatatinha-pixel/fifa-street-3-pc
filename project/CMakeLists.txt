@@ -13,7 +13,7 @@ include(generated/rexglue.cmake)
 # Sources
 set(FIFASTREET3_SOURCES
     src/main.cpp
-    src/pc_options.cpp
+    src/pc_settings.cpp
     src/native/gfx_system.cpp
     src/native/renderer.cpp
     src/native/guest_texture.cpp
@@ -31,7 +31,7 @@ else()
 endif()
 
 rexglue_setup_target(fifastreet3)
-target_link_libraries(fifastreet3 PRIVATE d3d11 d3d12 dxgi rex::libavcodec rex::libavutil)
+target_link_libraries(fifastreet3 PRIVATE d3d11 dxgi rex::libavcodec rex::libavutil)
 # Public headers of the SDK's FFmpeg build (LGPL 2.1, see third_party/ffmpeg) for the XMA decoder.
 target_include_directories(fifastreet3 PRIVATE third_party/ffmpeg/include)
 

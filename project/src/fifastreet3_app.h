@@ -11,11 +11,9 @@
 #include <rex/rex_app.h>
 
 #include "script_input.h"
-#include "pc_options.h"
+#include "pc_game_info.h"
 #include "native/audio_system.h"
 #include "native/gfx_system.h"
-
-namespace fs3_performance { double FramesPerSecond(); }
 
 class Fifastreet3App : public rex::ReXApp {
  public:
@@ -28,13 +26,6 @@ class Fifastreet3App : public rex::ReXApp {
   }
 
  protected:
-  void OnCreateDialogs(rex::ui::ImGuiDrawer* drawer) override {
-    pc_options_ = std::make_unique<PcOptionsHost>(window(), drawer, user_data_root(),
-        [] { return fs3_performance::FramesPerSecond(); });
-  }
-
-  void OnShutdown() override { pc_options_.reset(); }
-
   // Game files: --game_data_root wins; otherwise <exe>/assets (SDK default),
   // <exe>/game, then the extracted disc on D:.
   void OnConfigurePaths(rex::PathConfig& paths) override {
@@ -56,6 +47,8 @@ class Fifastreet3App : public rex::ReXApp {
   // (native/native_hooks.cpp); no GPU emulation plugin is loaded. Same for audio
   // (native/audio_exports.cpp): no APU model.
   void OnPreSetup(rex::RuntimeConfig& config) override {
+    // In-game PC settings (F1): window size/mode from fifastreet3-pc.ini.
+    pcs::Configure(PcGameInfo());
     config.gpu_plugin.clear();
     config.graphics = std::make_unique<fs3gfx::NativeGraphicsSystem>();
     // Native audio: XMA decoded by fs3audio::XmaEngine at the API level, own render driver.
@@ -75,7 +68,4 @@ class Fifastreet3App : public rex::ReXApp {
       };
     }
   }
-
- private:
-  std::unique_ptr<PcOptionsHost> pc_options_;
 };

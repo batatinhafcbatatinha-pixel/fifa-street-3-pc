@@ -15,9 +15,6 @@
 namespace rex::system {
 class XHostThread;
 }
-namespace rex::ui::d3d12 {
-class D3D12Provider;
-}
 
 namespace fs3gfx {
 using rex::X_STATUS;
@@ -30,13 +27,11 @@ class NativeGraphicsSystem final : public rex::system::IGraphicsSystem {
   X_STATUS SetupPresentation(rex::ui::WindowedAppContext* app_context) override;
   X_STATUS SetupGuestGpu(rex::runtime::FunctionDispatcher* function_dispatcher,
                          rex::system::KernelState* kernel_state) override;
-  bool has_presentation() const override { return presenter_ != nullptr; }
-  rex::ui::GraphicsProvider* provider() const override;
-  rex::ui::Presenter* presenter() const override { return presenter_.get(); }
+  bool has_presentation() const override { return false; }
+  rex::ui::GraphicsProvider* provider() const override { return nullptr; }
+  rex::ui::Presenter* presenter() const override { return nullptr; }
   void SetInterruptCallback(uint32_t callback, uint32_t user_data) override;
   void Shutdown() override;
-
-  rex::ui::d3d12::D3D12Provider* d3d12_provider() const { return provider_.get(); }
 
   // Dispatches the guest graphics interrupt on the calling (guest-capable) thread.
   void DispatchInterrupt(uint32_t source, uint32_t cpu);
@@ -45,8 +40,7 @@ class NativeGraphicsSystem final : public rex::system::IGraphicsSystem {
   static uint32_t ReadRegisterThunk(void* ppc_context, NativeGraphicsSystem* self, uint32_t addr);
   static void WriteRegisterThunk(void* ppc_context, NativeGraphicsSystem* self, uint32_t addr, uint32_t value);
 
-  std::unique_ptr<rex::ui::d3d12::D3D12Provider> provider_;
-  std::unique_ptr<rex::ui::Presenter> presenter_;
+  bool initialized_ = false;
   rex::ui::WindowedAppContext* app_context_ = nullptr;
   rex::runtime::FunctionDispatcher* dispatcher_ = nullptr;
   rex::system::KernelState* kernel_state_ = nullptr;

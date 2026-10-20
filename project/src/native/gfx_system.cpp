@@ -11,8 +11,6 @@
 #include <rex/system/xthread.h>
 #include <rex/system/xvideo.h>
 #include <rex/thread.h>
-#include <rex/ui/d3d12/d3d12_provider.h>
-#include <rex/ui/presenter.h>
 #include <rex/ui/windowed_app_context.h>
 
 #include "renderer.h"
@@ -32,32 +30,15 @@ NativeGraphicsSystem::~NativeGraphicsSystem() {
   if (g_system == this) g_system = nullptr;
 }
 
-rex::ui::GraphicsProvider* NativeGraphicsSystem::provider() const { return provider_.get(); }
-
+// The renderer presents on its own swap chain (renderer.cpp): no SDK presenter.
 X_STATUS NativeGraphicsSystem::SetupPresentation(rex::ui::WindowedAppContext* app_context) {
-  if (presenter_) return X_STATUS_SUCCESS;
-  if (!provider_) {
-    provider_ = rex::ui::d3d12::D3D12Provider::Create();
-    if (!provider_) {
-      REXLOG_ERROR("[native-gfx] Direct3D 12 is not available");
-      return X_STATUS_UNSUCCESSFUL;
-    }
-  }
+  if (initialized_) return X_STATUS_SUCCESS;
   app_context_ = app_context;
-  auto loss = [](bool, bool) { rex::FatalError("Graphics device lost"); };
-  if (app_context_) {
-    app_context_->CallInUIThreadSynchronous([this, loss]() { presenter_ = provider_->CreatePresenter(loss); });
-  } else {
-    presenter_ = provider_->CreatePresenter(loss);
-  }
-  if (!presenter_) {
-    REXLOG_ERROR("[native-gfx] unable to create the presenter");
-    return X_STATUS_UNSUCCESSFUL;
-  }
-  if (!Renderer::Get().Initialize(provider_.get(), presenter_.get())) {
+  if (!Renderer::Get().Initialize()) {
     REXLOG_ERROR("[native-gfx] native renderer initialization failed");
     return X_STATUS_UNSUCCESSFUL;
   }
+  initialized_ = true;
   REXLOG_INFO("[native-gfx] native Direct3D renderer ready (no GPU emulation)");
   return X_STATUS_SUCCESS;
 }
@@ -152,11 +133,6 @@ void NativeGraphicsSystem::Shutdown() {
     vblank_thread_.reset();
   }
   Renderer::Get().Shutdown();
-  if (presenter_) {
-    if (app_context_) app_context_->CallInUIThreadSynchronous([this]() { presenter_.reset(); });
-    presenter_.reset();
-  }
-  provider_.reset();
 }
 
 }  // namespace fs3gfx

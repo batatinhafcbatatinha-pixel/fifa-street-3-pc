@@ -4,6 +4,9 @@
 > This repository does **not** include the game, an ISO/XEX, EA assets, generated game code or a precompiled executable.
 > You need your own Xbox 360 USA disc. See [the full notice](#notice) at the end.
 
+> [!TIP]
+> **New: play without a controller.** The keyboard now plays as an Xbox controller, with the basic actions of **EA SPORTS FC 27's default WASD layout**: WASD to move, **L** pass, **;** shoot, **K** cross, **O** through ball, **P** sprint, **Esc** pause. See [Keyboard controls](#keyboard-controls).
+
 An experimental Xbox 360 FIFA Street 3 port built through static recompilation with the [ReXGlue SDK](https://github.com/rexglue/rexglue-sdk), with its own Direct3D 11 renderer and its own XMA audio pipeline. **This public repository is a source and local-build kit, not a ready-to-play game download.** The game's PowerPC code is translated locally from your own verified disc; no game executable or generated game code is distributed here.
 
 ## Status
@@ -59,9 +62,29 @@ python tools/play.py --game-files game_files
 
 Everything stays in `.local/`, which is excluded from version control. `--reuse-generated` skips the translation on later builds; `--sdk-dir` uses an SDK you already have.
 
-## Controls and settings
+## Keyboard controls
 
-Xbox controllers work as on the console. **F2** opens the PC settings (window size, fullscreen, FPS counter); **Alt+Enter** toggles fullscreen. Runtime options of the SDK can be passed after `play.py`, for example `python tools/play.py --game-files game_files --fullscreen=true`.
+No controller needed: the keyboard plays as an Xbox controller, with the keys of the default **WASD** layout of EA SPORTS FC 27 ([EA's layout chart](https://help.ea.com/en/articles/ea-sports-fc/mouse-keyboard/)). Only the basic actions are mapped for now.
+
+| Key | In a match | In menus | Controller button |
+| --- | --- | --- | --- |
+| **W A S D** (or arrows) | Move the player | Navigate | Left stick |
+| **L** | Ground pass · press (defending) | Confirm | A |
+| **;** (**Ç** on ABNT2 keyboards) | Shoot · tackle (defending) | Back | B |
+| **K** | Lob pass / cross · sliding tackle | | X |
+| **O** | Through pass · goalkeeper rush | | Y |
+| **P** | Sprint | | RT |
+| **I** | Change player | | LB |
+| **Enter** | | Confirm, passes *PRESS START* | A + Start |
+| **Esc** | Pause | | Start |
+| **Backspace** | | Back | B |
+| **Tab** | | | Back |
+
+The keyboard and an Xbox controller work at the same time. Skill moves, modifier keys and the mouse are not mapped yet. To turn the keyboard off, add `teclado=0` to the `[opcoes]` section of `fifastreet3-pc.ini` next to the executable.
+
+## Settings
+
+Xbox controllers work as on the console. **F1** opens the PC settings over the game (display mode, internal resolution, VSync, frame limit, FXAA, anisotropic filtering, volume, FPS counter); **Alt + Enter** or **F11** toggles fullscreen. Settings are saved in `fifastreet3-pc.ini`. Runtime options of the SDK can be passed after `play.py`, for example `python tools/play.py --game-files game_files --fullscreen=true`.
 
 ## Credits and licenses
 

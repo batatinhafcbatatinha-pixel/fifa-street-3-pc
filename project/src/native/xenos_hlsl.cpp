@@ -1220,7 +1220,8 @@ std::string Translator::BuildEntry() const {
       if (slot >= 0 && it.reg < 64) e += Format("  %s = xe_in.v[%d];\n", reg(it.reg).c_str(), slot);
     }
     if (s_.ps_param_gen_reg < 64) {
-      e += Format("  %s = float4((xe_in.pos.xy - 0.5) * float2(xe_face ? 1.0 : -1.0, 1.0), 0.0, 0.0);\n",
+      // In guest pixels (XAlpha.w: render targets may be drawn at a higher internal resolution).
+      e += Format("  %s = float4((xe_in.pos.xy * XAlpha.w - 0.5) * float2(xe_face ? 1.0 : -1.0, 1.0), 0.0, 0.0);\n",
                   reg(s_.ps_param_gen_reg).c_str());
     }
     e += "  float4 oC0 = 0.0, oC1 = 0.0, oC2 = 0.0, oC3 = 0.0, oDepth4 = 0.0;\n";

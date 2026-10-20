@@ -1,5 +1,5 @@
-// Native Direct3D 11 renderer for FIFA Street 3 (D3D11On12 on the SDK's D3D12 device, so the SDK
-// presenter and ImGui overlay keep working).
+// Native Direct3D 11 renderer for FIFA Street 3: own device and swap chain on the SDK window;
+// the final picture, the in-game PC settings and frame pacing are pc_settings.cpp.
 //
 // The game's statically linked Direct3D 9 (Xbox 360) library keeps its CPU-side state in the guest
 // device structure; native_hooks.cpp intercepts the operations that would have produced GPU
@@ -13,12 +13,6 @@
 
 namespace rex::memory {
 class Memory;
-}
-namespace rex::ui {
-class Presenter;
-}
-namespace rex::ui::d3d12 {
-class D3D12Provider;
 }
 
 namespace fs3gfx {
@@ -58,7 +52,7 @@ class Renderer {
  public:
   static Renderer& Get();
 
-  bool Initialize(rex::ui::d3d12::D3D12Provider* provider, rex::ui::Presenter* presenter);
+  bool Initialize();
   void AttachMemory(rex::memory::Memory* memory);
   void SetGuestDevice(uint32_t device) { guest_device_ = device; }
   void Shutdown();

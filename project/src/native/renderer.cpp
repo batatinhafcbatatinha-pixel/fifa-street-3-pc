@@ -5,11 +5,12 @@
 
 #include <windows.h>
 #include <d3d11_1.h>
-#include <d3d11on12.h>
+#include <dxgi1_2.h>
 #include <d3dcompiler.h>
 #include <wrl/client.h>
 
 #include <algorithm>
+#include <bit>
 #include <array>
 #include <atomic>
 #include <chrono>
@@ -26,9 +27,12 @@
 
 #include <rex/logging.h>
 #include <rex/system/xmemory.h>
-#include <rex/ui/d3d12/d3d12_presenter.h>
-#include <rex/ui/d3d12/d3d12_provider.h>
-#include <rex/ui/presenter.h>
+#include <rex/kernel/xboxkrnl/video.h>
+#include <rex/runtime.h>
+#include <rex/system/xvideo.h>
+#include <rex/ui/window.h>
+
+#include "pc_game_info.h"
 
 #include "guest_texture.h"
 #include "xenos_hlsl.h"
@@ -142,6 +146,7 @@ struct RenderTarget {
   uint32_t width = 0, height = 0, samples = 1;
   DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;
   bool depth = false;
+  float scale = 1.0f;  // host texels per guest texel (internal resolution)
 };
 
 struct TextureEntry {
@@ -157,6 +162,7 @@ struct TextureEntry {
   uint64_t gen_sum = ~0ull;  // page write generation sum at upload/resolve time
   uint32_t base = 0, base_bytes = 0, mip = 0, mip_bytes = 0;
   bool can_generate_mips = false;
+  float scale = 1.0f;  // resolve destinations: that of the targets resolved into it
   bool renderable = false;
 };
 
@@ -261,14 +267,6 @@ float4 ps_copy_depth_ms(float4 p : SV_Position) : SV_Target {
   int2 c = int2(p.xy) - xe_dst_origin.xy + xe_src_origin.xy;
   return xe_src_ms.Load(c, 0).rrrr;
 }
-RWTexture2D<unorm float4> xe_out : register(u0);
-[numthreads(8, 8, 1)] void cs_present(uint3 id : SV_DispatchThreadID) {
-  uint w, h;
-  xe_out.GetDimensions(w, h);
-  if (id.x >= w || id.y >= h) return;
-  float4 v = xe_src.Load(int3(id.xy, 0));
-  xe_out[id.xy] = float4(xe_src_origin.w != 0 ? v.bgr : v.rgb, 1.0);
-}
 )HLSL";
 
 const char* kRectGsHlsl = R"HLSL(
@@ -315,16 +313,31 @@ HRESULT CompileGuarded(pD3DCompile compile, const std::string& src, const char* 
 }  // namespace
 
 struct Renderer::Impl {
-  rex::ui::d3d12::D3D12Provider* provider = nullptr;
-  rex::ui::Presenter* presenter = nullptr;
   rex::memory::Memory* memory = nullptr;
   uint8_t* phys = nullptr;
 
   ComPtr<ID3D11Device1> dev;
   ComPtr<ID3D11DeviceContext1> ctx;
-  ComPtr<ID3D11On12Device> on12;
+  // Own swap chain on the SDK window (created at the first present).
+  ComPtr<IDXGISwapChain1> swap;
+  ComPtr<ID3D11RenderTargetView> back_rtv;
+  uint32_t back_w = 0, back_h = 0;
+  HWND hwnd = nullptr;
   pD3DCompile compile = nullptr;
   std::recursive_mutex mutex;
+  // Internal resolution (PC settings, fixed at boot): render targets and resolve destinations are
+  // `scale` times their guest size when at least 640 wide (the scene, half-resolution effects,
+  // shadow maps); smaller ones (reduction chains, probes) keep it. Everything else stays in guest
+  // pixels.
+  float scale = 1.0f;
+  float ScaleFor(uint32_t width) const { return width >= 640 ? scale : 1.0f; }
+  static uint32_t ScaledSize(uint32_t v, float s) {
+    return std::max<uint32_t>(1, uint32_t(std::ceil(float(v) * s - 0.001f)));
+  }
+  static LONG ScaledCoord(LONG v, float s) { return LONG(std::lround(float(v) * s)); }
+  static D3D11_RECT ScaledRect(const D3D11_RECT& r, float s) {
+    return {ScaledCoord(r.left, s), ScaledCoord(r.top, s), ScaledCoord(r.right, s), ScaledCoord(r.bottom, s)};
+  }
   bool ready = false;
 
   // Guest physical memory mirror.
@@ -348,11 +361,9 @@ struct Renderer::Impl {
   std::unordered_map<uint64_t, ComPtr<ID3D11BlendState>> blend_states;
   std::unordered_map<uint64_t, ComPtr<ID3D11DepthStencilState>> depth_states;
   std::unordered_map<uint64_t, ComPtr<ID3D11RasterizerState>> raster_states;
-  std::unordered_map<ID3D12Resource*, std::pair<ComPtr<ID3D11Resource>, ComPtr<ID3D11UnorderedAccessView>>> outputs;
 
   ComPtr<ID3D11VertexShader> vs_fullscreen;
   ComPtr<ID3D11PixelShader> ps_copy, ps_copy_ms, ps_copy_depth, ps_copy_depth_ms;
-  ComPtr<ID3D11ComputeShader> cs_present;
   ComPtr<ID3D11GeometryShader> gs_rect;
   ComPtr<ID3D11ShaderResourceView> dummy_2d, dummy_3d, dummy_cube, dummy_array;
   ComPtr<ID3D11SamplerState> point_sampler;
@@ -421,9 +432,7 @@ struct Renderer::Impl {
     return code;
   }
 
-  bool Init(rex::ui::d3d12::D3D12Provider* p, rex::ui::Presenter* pr) {
-    provider = p;
-    presenter = pr;
+  bool Init() {
     if (const char* v = std::getenv("FS3_GFX_LOG")) log_stats = *v && *v != '0';
     if (const char* v = std::getenv("FS3_DUMP_EVERY")) dump_every = uint32_t(std::strtoul(v, nullptr, 10));
     if (const char* v = std::getenv("FS3_TRACE_FRAME")) trace_frame = std::strtoull(v, nullptr, 10);
@@ -437,19 +446,24 @@ struct Renderer::Impl {
     if (!fxc) return false;
     compile = reinterpret_cast<pD3DCompile>(GetProcAddress(fxc, "D3DCompile"));
     if (!compile) return false;
-    IUnknown* queues[] = {p->GetDirectQueue()};
+    // PC settings: graphics card chosen in the settings menu (null = Windows default).
+    pcs::Configure(PcGameInfo(), false);
+    IDXGIAdapter1* adapter = pcs::Adapter();
     D3D_FEATURE_LEVEL levels[] = {D3D_FEATURE_LEVEL_11_1};
     ComPtr<ID3D11Device> d;
     ComPtr<ID3D11DeviceContext> c;
-    HRESULT hr = D3D11On12CreateDevice(p->GetDevice(), 0, levels, 1, queues, 1, 0, &d, &c, nullptr);
+    HRESULT hr = D3D11CreateDevice(adapter, adapter ? D3D_DRIVER_TYPE_UNKNOWN : D3D_DRIVER_TYPE_HARDWARE, nullptr,
+                                   0, levels, 1, D3D11_SDK_VERSION, &d, nullptr, &c);
+    if (adapter) adapter->Release();
+    scale = pcs::ResolutionScale();
+    if (scale != 1.0f) REXLOG_INFO("[native-gfx] internal resolution x{:.3f}", scale);
     if (FAILED(hr)) {
-      REXLOG_ERROR("[native-gfx] D3D11On12CreateDevice failed {:08X}", uint32_t(hr));
+      REXLOG_ERROR("[native-gfx] D3D11CreateDevice failed {:08X}", uint32_t(hr));
       return false;
     }
     d.As(&dev);
     c.As(&ctx);
-    d.As(&on12);
-    if (!dev || !ctx || !on12) return false;
+    if (!dev || !ctx) return false;
 
     D3D11_BUFFER_DESC bd = {};
     bd.ByteWidth = kPhysicalSize;
@@ -503,9 +517,8 @@ struct Renderer::Impl {
     auto psmb = Compile(util, "ps_copy_ms", "ps_5_0", &err);
     auto psdb = Compile(util, "ps_copy_depth", "ps_5_0", &err);
     auto psdmb = Compile(util, "ps_copy_depth_ms", "ps_5_0", &err);
-    auto csb = Compile(util, "cs_present", "cs_5_0", &err);
     auto gsb = Compile(kRectGsHlsl, "main", "gs_5_0", &err);
-    if (!vsb || !psb || !psmb || !psdb || !psdmb || !csb || !gsb) {
+    if (!vsb || !psb || !psmb || !psdb || !psdmb || !gsb) {
       REXLOG_ERROR("[native-gfx] utility shader compile failed: {}", err);
       return false;
     }
@@ -514,7 +527,6 @@ struct Renderer::Impl {
     dev->CreatePixelShader(psmb->GetBufferPointer(), psmb->GetBufferSize(), nullptr, &ps_copy_ms);
     dev->CreatePixelShader(psdb->GetBufferPointer(), psdb->GetBufferSize(), nullptr, &ps_copy_depth);
     dev->CreatePixelShader(psdmb->GetBufferPointer(), psdmb->GetBufferSize(), nullptr, &ps_copy_depth_ms);
-    dev->CreateComputeShader(csb->GetBufferPointer(), csb->GetBufferSize(), nullptr, &cs_present);
     dev->CreateGeometryShader(gsb->GetBufferPointer(), gsb->GetBufferSize(), nullptr, &gs_rect);
     if (debug_ps) {
       std::string src = "#define DEBUG " + std::to_string(debug_ps) + "\n";
@@ -727,8 +739,9 @@ struct Renderer::Impl {
     n.samples = samples;
     n.depth = depth;
     D3D11_TEXTURE2D_DESC td = {};
-    td.Width = n.width;
-    td.Height = n.height;
+    n.scale = ScaleFor(n.width);
+    td.Width = ScaledSize(n.width, n.scale);
+    td.Height = ScaledSize(n.height, n.scale);
     td.MipLevels = 1;
     td.ArraySize = 1;
     td.SampleDesc = {samples, 0};
@@ -770,8 +783,8 @@ struct Renderer::Impl {
       float zero[4] = {0, 0, 0, 0};
       ctx->ClearRenderTargetView(n.rtv.Get(), zero);
     }
-    if (rt.tex && rt.samples == n.samples) {
-      D3D11_BOX box = {0, 0, 0, rt.width, rt.height, 1};
+    if (rt.tex && rt.samples == n.samples && rt.scale == n.scale) {
+      D3D11_BOX box = {0, 0, 0, ScaledSize(rt.width, rt.scale), ScaledSize(rt.height, rt.scale), 1};
       ctx->CopySubresourceRegion(n.tex.Get(), 0, 0, 0, 0, rt.tex.Get(), 0, &box);
     }
     rt = std::move(n);
@@ -792,13 +805,15 @@ struct Renderer::Impl {
     return HashBytes(k, sizeof(k));
   }
 
-  TextureEntry* GetTexture(const TexFetch& f, bool for_render) {
+  // `target_scale`: for a resolve destination, the internal resolution of the source target.
+  TextureEntry* GetTexture(const TexFetch& f, bool for_render, float target_scale = 1.0f) {
     DXGI_FORMAT format = HostTextureFormat(f.format(), false);
     if (format == DXGI_FORMAT_UNKNOWN || !f.base_address()) return nullptr;
     uint64_t key = TextureKey(f);
     auto& e = textures[key];
     bool renderable = !IsBlockCompressed(format) && f.dimension() != 2;
-    if (e.tex && !(for_render && !e.renderable && renderable)) return &e;
+    float want = for_render && renderable && f.dimension() != 3 ? target_scale : 1.0f;
+    if (e.tex && !(for_render && !e.renderable && renderable) && !(for_render && e.scale != want)) return &e;
     e = TextureEntry{};
     e.fetch = f;
     e.format = format;
@@ -809,6 +824,7 @@ struct Renderer::Impl {
     e.is_3d = f.dimension() == 2;
     e.is_cube = f.dimension() == 3;
     e.renderable = renderable;
+    e.scale = want;
     uint32_t longest = std::max({e.width, e.height, e.is_3d ? e.depth : 1u});
     uint32_t max_levels = 1;
     while ((1u << max_levels) <= longest) max_levels++;
@@ -830,8 +846,8 @@ struct Renderer::Impl {
       e.tex = t;
     } else {
       D3D11_TEXTURE2D_DESC td = {};
-      td.Width = w;
-      td.Height = h;
+      td.Width = ScaledSize(w, e.scale);
+      td.Height = ScaledSize(h, e.scale);
       td.MipLevels = e.levels;
       td.ArraySize = e.depth;
       td.Format = storage;
@@ -890,6 +906,13 @@ struct Renderer::Impl {
   void RefreshTexture(TextureEntry& e) {
     uint64_t sum = EntryGenSum(e);
     if (sum == e.gen_sum) return;
+    if (e.scale != 1.0f) {
+      // The CPU rewrote a resolve destination: back to a guest-size texture for its data (the
+      // next resolve there scales it again). `e` is the same map slot, rebuilt in place.
+      TexFetch f = e.fetch;
+      e.tex.Reset();
+      if (!GetTexture(f, false) || !e.tex) return;
+    }
     e.gen_sum = sum;
     Watch(e.base, e.base_bytes);
     if (e.mip_bytes) Watch(e.mip, e.mip_bytes);
@@ -912,12 +935,16 @@ struct Renderer::Impl {
 
   ID3D11SamplerState* GetSampler(const uint32_t f[6]) {
     uint32_t key32[3] = {f[0] & 0x7FFC00, f[3] & 0xFFF80000, f[4] & 0x3FF003FC};
-    uint64_t key = HashBytes(key32, sizeof(key32)) ^ (f[5] & 3);
+    // PC settings: anisotropic filtering forced on filtered (linear mip) fetches.
+    int forced = pcs::Anisotropy();
+    uint64_t key = HashBytes(key32, sizeof(key32)) ^ (f[5] & 3) ^ (uint64_t(forced) << 56);
     auto& s = samplers[key];
     if (s) return s.Get();
     D3D11_SAMPLER_DESC d = {};
     uint32_t mag = (f[3] >> 19) & 3, min = (f[3] >> 21) & 3, mip = (f[3] >> 23) & 3, aniso = (f[3] >> 25) & 7;
     bool lmag = mag == 1, lmin = min == 1, lmip = mip == 1;
+    if (forced > 1 && lmag && lmin && lmip)
+      aniso = std::max<uint32_t>(aniso == 7 ? 0 : aniso, uint32_t(std::countr_zero(unsigned(forced))) + 1);
     if (aniso > 1) {
       d.Filter = D3D11_FILTER_ANISOTROPIC;
       d.MaxAnisotropy = std::min(16u, 1u << (aniso - 1));
@@ -1035,6 +1062,7 @@ struct Renderer::Impl {
     uint32_t width = 1, height = 1;
     uint32_t samples = 1;
     float rt_bias[4] = {1, 1, 1, 1};
+    float scale = 1.0f;  // internal resolution of the bound targets
   };
 
   // With predicated tiling the bound surfaces are one EDRAM tile (e.g. 640x384) while draws and
@@ -1104,6 +1132,9 @@ struct Renderer::Impl {
       (void)dsurf;
       t.depth = GetRenderTarget(d.reg(0x2002), surface_info, minw, minh, true);
     }
+    t.scale = t.depth ? t.depth->scale : 1.0f;
+    for (int i = 3; i >= 0; i--)
+      if (t.color[i]) t.scale = t.color[i]->scale;
     ctx->OMSetRenderTargets(4, rtvs, t.depth ? t.depth->dsv.Get() : nullptr);
   }
 
@@ -1223,6 +1254,10 @@ struct Renderer::Impl {
       ndc[2] -= 1.0f / vw;
       ndc[3] += 1.0f / vh;
     }
+    vp.TopLeftX *= t.scale;
+    vp.TopLeftY *= t.scale;
+    vp.Width *= t.scale;
+    vp.Height *= t.scale;
     ctx->RSSetViewports(1, &vp);
     D3D11_RECT sc = {0, 0, LONG(t.width), LONG(t.height)};
     if (d.u32(0x2E48)) {
@@ -1231,6 +1266,7 @@ struct Renderer::Impl {
       sc.right = std::min<LONG>(sc.right, LONG(d.u32(0x3184)));
       sc.bottom = std::min<LONG>(sc.bottom, LONG(d.u32(0x3188)));
     }
+    sc = ScaledRect(sc, t.scale);
     ctx->RSSetScissorRects(1, &sc);
   }
 
@@ -1409,6 +1445,7 @@ struct Renderer::Impl {
     std::memcpy(&zxform[2], &vertex_base, 4);
     std::memcpy(st.zxform, zxform, sizeof(zxform));
     std::memcpy(st.rt_bias, t.rt_bias, sizeof(t.rt_bias));
+    st.alpha[3] = 1.0f / t.scale;  // host pixels -> guest pixels (pixel position parameter)
     // User clip planes: PA_CL_CLIP_CNTL.UCP_ENA_n, planes kept by the D3D library at +0x281C.
     uint32_t clip_cntl = d.reg(0x2204);
     for (uint32_t i = 0; i < 6; i++)
@@ -1649,6 +1686,7 @@ struct Renderer::Impl {
     float color[4] = {0, 0, 0, 0};
     if (c.color)
       for (int i = 0; i < 4; i++) color[i] = BeF(G(base, c.color + i * 4));
+    r = ScaledRect(r, t.scale);
     for (int i = 0; i < 4; i++) {
       if ((c.flags & (1u << i)) && t.color[i]) ctx->ClearView(t.color_rtv[i], color, &r, 1);
     }
@@ -1682,7 +1720,7 @@ struct Renderer::Impl {
       TexFetch f;
       for (int i = 0; i < 6; i++) f.d[i] = Be32(G(base, c.dest_texture + 0x1C + i * 4));
       NormalizeFetch(f.d);
-      TextureEntry* dst = c.level == 0 ? GetTexture(f, true) : nullptr;
+      TextureEntry* dst = c.level == 0 ? GetTexture(f, true, src->scale) : nullptr;
       if (dst && dst->renderable) {
         int32_t sx = 0, sy = 0, ex = int32_t(sw), ey = int32_t(sh);
         if (c.source_rect) {
@@ -1715,15 +1753,18 @@ struct Renderer::Impl {
           // red and blue back); keep host textures in the same component order.
           int32_t swap = !from_depth && src->format == DXGI_FORMAT_R8G8B8A8_UNORM &&
                          (f.format() == 6 || f.format() == 62);
-          int32_t cb[12] = {sx, sy, int32_t(src->samples), swap, dx, dy, 0, 0};
+          // Texel-for-texel copy: the destination has the source's scale (GetTexture).
+          const float rscale = src->scale;
+          int32_t cb[12] = {ScaledCoord(sx, rscale), ScaledCoord(sy, rscale), int32_t(src->samples), swap, ScaledCoord(dx, rscale),
+                            ScaledCoord(dy, rscale), 0, 0};
           float scale = std::ldexp(1.0f, int32_t(c.flags) >> 26);
           std::memcpy(&cb[8], &scale, 4);
           Upload(cb_copy.Get(), cb, sizeof(cb));
           ID3D11RenderTargetView* r = rtv.Get();
           ctx->OMSetRenderTargets(1, &r, nullptr);
-          D3D11_VIEWPORT vp = {0, 0, float(dst->width), float(dst->height), 0, 1};
+          D3D11_VIEWPORT vp = {0, 0, float(ScaledSize(dst->width, rscale)), float(ScaledSize(dst->height, rscale)), 0, 1};
           ctx->RSSetViewports(1, &vp);
-          D3D11_RECT sc = {dx, dy, dx + (ex - sx), dy + (ey - sy)};
+          D3D11_RECT sc = ScaledRect({dx, dy, dx + (ex - sx), dy + (ey - sy)}, rscale);
           ctx->RSSetScissorRects(1, &sc);
           D3D11_RASTERIZER_DESC rd = {};
           rd.FillMode = D3D11_FILL_SOLID;
@@ -1949,45 +1990,76 @@ struct Renderer::Impl {
       std::snprintf(path, sizeof(path), "fs3-frame-%06llu.bmp", static_cast<unsigned long long>(frames));
       DumpTexture(*e, path);
     }
-    ID3D11ShaderResourceView* srv = e->srv.Get();
-    uint32_t w = e->width, h = e->height;
-    presenter->RefreshGuestOutput(w, h, w, h, [&](rex::ui::Presenter::GuestOutputRefreshContext& rc) -> bool {
-      auto& c12 = static_cast<rex::ui::d3d12::D3D12Presenter::D3D12GuestOutputRefreshContext&>(rc);
-      ID3D12Resource* res = c12.resource_uav_capable();
-      auto& out = outputs[res];
-      if (!out.first) {
-        D3D11_RESOURCE_FLAGS flags = {};
-        flags.BindFlags = D3D11_BIND_UNORDERED_ACCESS;
-        if (FAILED(on12->CreateWrappedResource(res, &flags, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
-                                               D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
-                                               IID_PPV_ARGS(&out.first)))) {
-          return false;
-        }
-        dev->CreateUnorderedAccessView(out.first.Get(), nullptr, &out.second);
+    // Final picture, settings menu, vsync and frame pacing: pc_settings.cpp.
+    pcs::Picture picture;
+    picture.srv = e->srv.Get();
+    // The console's display scaler stretches the front buffer (e.g. 1024x600) to the video
+    // mode: show it with the video mode's shape, not the buffer's.
+    rex::system::X_VIDEO_MODE mode;
+    rex::kernel::xboxkrnl::VdQueryVideoMode(&mode);
+    picture.width = mode.display_width ? float(mode.display_width) : 1280.0f;
+    picture.height = mode.display_height ? float(mode.display_height) : 720.0f;
+    if (frames < 3 || frames % 3600 == 0)
+      REXLOG_INFO("[native-gfx] front buffer {}x{} shown as {}x{}", e->width, e->height, picture.width,
+                  picture.height);
+    // Front buffers come from resolves, so 8_8_8_8 ones are in BGRA order (see Resolve).
+    picture.swap_rb = e->format == DXGI_FORMAT_R8G8B8A8_UNORM;
+    if (!EnsureSwapChain()) return;
+    pcs::Present(dev.Get(), ctx.Get(), swap.Get(), picture,
+                 [this](ID3D11RenderTargetView** rtv, uint32_t* w, uint32_t* h) {
+                   if (!EnsureSwapChain()) return false;
+                   *rtv = back_rtv.Get();
+                   *w = back_w;
+                   *h = back_h;
+                   return true;
+                 });
+  }
+
+  // The swap chain on the SDK window, sized to its client area.
+  bool EnsureSwapChain() {
+    if (!hwnd) {
+      auto* runtime = rex::Runtime::instance();
+      if (auto* window = runtime ? runtime->display_window() : nullptr)
+        hwnd = static_cast<HWND>(window->GetNativeWindowHandle());
+      if (!hwnd) return false;
+    }
+    RECT rc;
+    if (!GetClientRect(hwnd, &rc)) return false;
+    uint32_t w = std::max<LONG>(rc.right - rc.left, 1), h = std::max<LONG>(rc.bottom - rc.top, 1);
+    if (swap && back_rtv && w == back_w && h == back_h) return true;
+    if (!swap) {
+      ComPtr<IDXGIDevice> dxgi_device;
+      ComPtr<IDXGIAdapter> adapter;
+      ComPtr<IDXGIFactory2> factory;
+      dev.As(&dxgi_device);
+      dxgi_device->GetAdapter(&adapter);
+      adapter->GetParent(IID_PPV_ARGS(&factory));
+      DXGI_SWAP_CHAIN_DESC1 d{};
+      d.Width = w;
+      d.Height = h;
+      d.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+      d.SampleDesc.Count = 1;
+      d.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+      d.BufferCount = 2;
+      d.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
+      d.Flags = pcs::SwapChainFlags();
+      if (FAILED(factory->CreateSwapChainForHwnd(dev.Get(), hwnd, &d, nullptr, nullptr, &swap))) {
+        REXLOG_ERROR("[native-gfx] swap chain creation failed");
+        return false;
       }
-      ID3D11Resource* wrapped = out.first.Get();
-      on12->AcquireWrappedResources(&wrapped, 1);
-      ctx->CSSetShader(cs_present.Get(), nullptr, 0);
-      // Front buffers come from resolves, so 8_8_8_8 ones are in BGRA order (see Resolve).
-      int32_t pcb[12] = {0, 0, 0, e->format == DXGI_FORMAT_R8G8B8A8_UNORM, 0, 0, 0, 0};
-      float one = 1.0f;
-      std::memcpy(&pcb[8], &one, 4);
-      Upload(cb_copy.Get(), pcb, sizeof(pcb));
-      ID3D11Buffer* pcbp = cb_copy.Get();
-      ctx->CSSetConstantBuffers(0, 1, &pcbp);
-      ctx->CSSetShaderResources(0, 1, &srv);
-      ID3D11UnorderedAccessView* uav = out.second.Get();
-      ctx->CSSetUnorderedAccessViews(0, 1, &uav, nullptr);
-      ctx->Dispatch((w + 7) / 8, (h + 7) / 8, 1);
-      ID3D11ShaderResourceView* nsrv = nullptr;
-      ID3D11UnorderedAccessView* nuav = nullptr;
-      ctx->CSSetShaderResources(0, 1, &nsrv);
-      ctx->CSSetUnorderedAccessViews(0, 1, &nuav, nullptr);
-      on12->ReleaseWrappedResources(&wrapped, 1);
+      factory->MakeWindowAssociation(hwnd, DXGI_MWA_NO_ALT_ENTER);
+    } else {
+      back_rtv.Reset();
+      ctx->OMSetRenderTargets(0, nullptr, nullptr);
       ctx->Flush();
-      return true;
-    });
-    ctx->Flush();
+      if (FAILED(swap->ResizeBuffers(0, w, h, DXGI_FORMAT_UNKNOWN, pcs::SwapChainFlags()))) return false;
+    }
+    ComPtr<ID3D11Texture2D> bb;
+    swap->GetBuffer(0, IID_PPV_ARGS(&bb));
+    dev->CreateRenderTargetView(bb.Get(), nullptr, &back_rtv);
+    back_w = w;
+    back_h = h;
+    return back_rtv != nullptr;
   }
 };
 
@@ -1999,9 +2071,9 @@ Renderer& Renderer::Get() {
 Renderer::Renderer() : impl_(std::make_unique<Impl>()) {}
 Renderer::~Renderer() = default;
 
-bool Renderer::Initialize(rex::ui::d3d12::D3D12Provider* provider, rex::ui::Presenter* presenter) {
+bool Renderer::Initialize() {
   std::lock_guard lock(impl_->mutex);
-  return impl_->Init(provider, presenter);
+  return impl_->Init();
 }
 
 void Renderer::AttachMemory(rex::memory::Memory* memory) {
