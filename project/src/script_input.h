@@ -136,7 +136,13 @@ class ScriptInputDriver final : public rex::input::InputDriver {
     int16_t lx = 0, ly = 0;
   };
 
+  // The game polls the pad thousands of times a second: look at the file 4 times a second.
+  std::chrono::steady_clock::time_point next_check_{};
+
   void Reload() {
+    auto now = std::chrono::steady_clock::now();
+    if (now < next_check_) return;
+    next_check_ = now + std::chrono::milliseconds(250);
     std::error_code ec;
     auto size = std::filesystem::file_size(path_, ec);
     if (ec || size == loaded_size_) return;
@@ -158,6 +164,7 @@ class ScriptInputDriver final : public rex::input::InputDriver {
       events.push_back(e);
     }
     std::lock_guard<std::mutex> lock(mutex_);
+    REXLOG_INFO("script input: {} events loaded", events.size());
     events_ = std::move(events);
     loaded_size_ = size;
   }

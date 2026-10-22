@@ -29,6 +29,8 @@ double FramesPerSecond() { return fs3gfx::Renderer::Get().frames_per_second(); }
 
 using fs3gfx::Renderer;
 
+void UpdateMenuButton(uint8_t* base);  // menu_hooks.cpp
+
 namespace {
 
 // Holds the flip to the presentation interval (in vertical blanks, 60 Hz on the console), as the
@@ -131,5 +133,6 @@ REX_HOOK_RAW(sub_8250A6B0) {
   frame.ctx.r3.u64 = (front & 0xFFFFF000u) | (interval << 8) | flags;
   sub_8250A518(frame, base);
   *rex::memory::GuestPtr(base, device + 0x2ABD) |= 0x10;
+  UpdateMenuButton(base);
   PaceFlip(interval);
 }

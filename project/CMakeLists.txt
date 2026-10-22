@@ -14,10 +14,15 @@ include(generated/rexglue.cmake)
 set(FIFASTREET3_SOURCES
     src/main.cpp
     src/pc_settings.cpp
+    src/pc_theme.cpp
     src/native/gfx_system.cpp
     src/native/renderer.cpp
     src/native/guest_texture.cpp
     src/native/native_hooks.cpp
+    src/menu_hooks.cpp
+    src/apt_menu.cpp
+    src/timing_diag.cpp
+    src/xbox_online.cpp
     src/native/xenos_hlsl.cpp
     src/native/xma_engine.cpp
     src/native/audio_system.cpp
@@ -31,7 +36,7 @@ else()
 endif()
 
 rexglue_setup_target(fifastreet3)
-target_link_libraries(fifastreet3 PRIVATE d3d11 dxgi rex::libavcodec rex::libavutil)
+target_link_libraries(fifastreet3 PRIVATE d3d11 dxgi rex::xxhash rex::libavcodec rex::libavutil)
 # Public headers of the SDK's FFmpeg build (LGPL 2.1, see third_party/ffmpeg) for the XMA decoder.
 target_include_directories(fifastreet3 PRIVATE third_party/ffmpeg/include)
 

@@ -26,6 +26,7 @@
 #include <vector>
 
 #include <rex/logging.h>
+#include <xxhash.h>
 #include <rex/system/xmemory.h>
 #include <rex/kernel/xboxkrnl/video.h>
 #include <rex/runtime.h>
@@ -160,6 +161,12 @@ struct TextureEntry {
   ComPtr<ID3D11ShaderResourceView> srv_array, srv_array_signed;  // 2D/stacked as a Texture2DArray
   std::unordered_map<uint32_t, ComPtr<ID3D11RenderTargetView>> rtv;  // per array slice
   uint64_t gen_sum = ~0ull;  // page write generation sum at upload/resolve time
+  uint64_t content_hash = 0;  // XXH3 of the guest bytes last decoded (0 = not hashed yet)
+  // Rewritten by the CPU nearly every frame (e.g. textures the game animates): not write-watched
+  // (each watched write costs an exception), its bytes are hashed once a frame instead.
+  bool dynamic = false;
+  uint32_t changes = 0;
+  uint64_t changes_since = 0, checked_frame = ~0ull;
   uint32_t base = 0, base_bytes = 0, mip = 0, mip_bytes = 0;
   bool can_generate_mips = false;
   float scale = 1.0f;  // resolve destinations: that of the targets resolved into it
@@ -312,7 +319,57 @@ HRESULT CompileGuarded(pD3DCompile compile, const std::string& src, const char* 
 
 }  // namespace
 
+// FS3_PROFILE=1: CPU time of the phases of Draw (ms per frame) and draws per frame, every 5 s.
+struct DrawProfile {
+  enum { Setup, Mirror, States, Constants, StateBuild, Bind, Submit, Unbind, Count };
+  static constexpr const char* kNames[Count] = {"setup", "mirror", "states", "constants", "xestate", "bind", "submit",
+                                                "unbind"};
+  bool enabled = std::getenv("FS3_PROFILE") != nullptr;
+  double ms[Count] = {};
+  uint64_t draws = 0, frames = 0;
+  std::chrono::steady_clock::time_point window = std::chrono::steady_clock::now();
+  void Frame() {
+    if (!enabled) return;
+    ++frames;
+    auto now = std::chrono::steady_clock::now();
+    if (now - window < std::chrono::seconds(5)) return;
+    std::string line;
+    double total = 0;
+    char buf[64];
+    for (int i = 0; i < Count; i++) {
+      std::snprintf(buf, sizeof(buf), " %s=%.3f", kNames[i], ms[i] / frames);
+      line += buf;
+      total += ms[i];
+    }
+    double secs = std::chrono::duration<double>(now - window).count();
+    REXLOG_INFO("fs3 profile: fps={:.1f} draws/frame={:.0f} draw ms/frame={:.3f}{}", frames / secs,
+                double(draws) / frames, total / frames, line);
+    for (double& v : ms) v = 0;
+    draws = frames = 0;
+    window = now;
+  }
+};
+struct DrawTimer {
+  DrawProfile& p;
+  std::chrono::steady_clock::time_point last;
+  int phase = 0;
+  explicit DrawTimer(DrawProfile& prof) : p(prof) {
+    if (p.enabled) { last = std::chrono::steady_clock::now(); ++p.draws; }
+  }
+  void Mark(int next) {
+    if (!p.enabled) return;
+    auto now = std::chrono::steady_clock::now();
+    p.ms[phase] += std::chrono::duration<double, std::milli>(now - last).count();
+    last = now;
+    phase = next;
+  }
+  ~DrawTimer() { Mark(phase); }
+};
+
 struct Renderer::Impl {
+  DrawProfile draw_profile;
+  std::vector<uint32_t> index_scratch, index_scratch2;  // per-draw index lists, reused
+  std::unordered_map<ID3D11Buffer*, std::vector<uint8_t>> uploaded;  // last contents per constant buffer
   rex::memory::Memory* memory = nullptr;
   uint8_t* phys = nullptr;
 
@@ -728,7 +785,8 @@ struct Renderer::Impl {
     uint64_t key = uint64_t(base) | (uint64_t(format) << 12) | (uint64_t(pitch) << 16) | (uint64_t(msaa) << 30) |
                    (uint64_t(depth) << 32);
     auto& rt = render_targets[key];
-    if (rt.tex && rt.width >= width && rt.height >= height) return &rt;
+    if (rt.tex && rt.width >= width && rt.height >= height && rt.scale == ScaleFor(std::max(width, rt.width)))
+      return &rt;
     RenderTarget n;
     n.width = std::max(width, rt.width);
     n.height = std::max(height, rt.height);
@@ -899,9 +957,49 @@ struct Renderer::Impl {
   }
 
   // Uploads every level from guest memory if the CPU changed it since the last upload/resolve.
+  // FS3_TEX_LOG=1: once a second, how many textures were re-decoded (and skipped as unchanged).
+  void TexStats(const TextureEntry& e, bool unchanged) {
+    static const bool on = [] { const char* v = std::getenv("FS3_TEX_LOG"); return v && *v == '1'; }();
+    if (!on) return;
+    static uint32_t decoded = 0, skipped = 0;
+    static uint64_t bytes = 0;
+    static std::map<uint32_t, uint32_t> top;
+    static auto window = std::chrono::steady_clock::now();
+    if (unchanged) {
+      ++skipped;
+    } else {
+      ++decoded;
+      bytes += e.base_bytes + e.mip_bytes;
+      ++top[e.base];
+    }
+    auto now = std::chrono::steady_clock::now();
+    if (now - window >= std::chrono::seconds(1)) {
+      std::string list;
+      int n = 0;
+      for (auto& [b, c] : top)
+        if (c > 10 && n++ < 6) list += fmt::format(" {:08X}x{}", b, c);
+      REXLOG_INFO("[native-gfx] textures/s: decoded {} ({} KB), unchanged {};{}", decoded, bytes / 1024, skipped, list);
+      decoded = skipped = 0;
+      bytes = 0;
+      top.clear();
+      window = now;
+    }
+  }
+
   void RefreshTexture(TextureEntry& e) {
-    uint64_t sum = EntryGenSum(e);
-    if (sum == e.gen_sum) return;
+    uint64_t sum = 0;
+    if (e.dynamic) {
+      if (e.checked_frame == frames) return;
+      e.checked_frame = frames;
+    } else {
+      sum = EntryGenSum(e);
+      if (sum == e.gen_sum) return;
+      if (frames - e.changes_since > 120) {
+        e.changes_since = frames;
+        e.changes = 0;
+      }
+      if (++e.changes >= 30 && e.scale == 1.0f) e.dynamic = true;  // 30 rewrites within 2 s
+    }
     if (e.scale != 1.0f) {
       // The CPU rewrote a resolve destination: back to a guest-size texture for its data (the
       // next resolve there scales it again). `e` is the same map slot, rebuilt in place.
@@ -909,9 +1007,19 @@ struct Renderer::Impl {
       e.tex.Reset();
       if (!GetTexture(f, false) || !e.tex) return;
     }
-    e.gen_sum = sum;
-    Watch(e.base, e.base_bytes);
-    if (e.mip_bytes) Watch(e.mip, e.mip_bytes);
+    if (!e.dynamic) {
+      e.gen_sum = sum;  // after a rebuild above, which starts the entry afresh
+      Watch(e.base, e.base_bytes);
+      if (e.mip_bytes) Watch(e.mip, e.mip_bytes);
+    }
+    // A write to the texture's pages is often to something else sharing them (game data next
+    // to the texture): decode only when the texture's own bytes changed.
+    uint64_t content = XXH3_64bits(phys + e.base, e.base_bytes);
+    if (e.mip_bytes) content ^= XXH3_64bits(phys + e.mip, e.mip_bytes) * 0x9E3779B97F4A7C15ull;
+    content |= 1;
+    TexStats(e, content == e.content_hash);
+    if (content == e.content_hash) return;
+    e.content_hash = content;
     HostTexture host;
     if (!DecodeTexture(phys, e.fetch, host)) {
       WarnOnce(0x800000000ull | e.fetch.format(), "texture decode failed, format", e.fetch.format());
@@ -1035,10 +1143,19 @@ struct Renderer::Impl {
   }
 
   void Upload(ID3D11Buffer* b, const void* data, size_t size) {
+    // Constant buffers keep their contents: skip the Map when nothing changed since the last
+    // upload to this buffer (most draws repeat the previous constants). FS3_NO_CONSTANT_CACHE=1.
+    static const bool cache = !std::getenv("FS3_NO_CONSTANT_CACHE");
+    std::vector<uint8_t>* last = nullptr;
+    if (cache) {
+      last = &uploaded[b];
+      if (last->size() == size && std::memcmp(last->data(), data, size) == 0) return;
+    }
     D3D11_MAPPED_SUBRESOURCE m;
     if (SUCCEEDED(ctx->Map(b, 0, D3D11_MAP_WRITE_DISCARD, 0, &m))) {
       std::memcpy(m.pData, data, size);
       ctx->Unmap(b, 0);
+      if (last) last->assign(static_cast<const uint8_t*>(data), static_cast<const uint8_t*>(data) + size);
     }
   }
 
@@ -1268,6 +1385,7 @@ struct Renderer::Impl {
 
   void Draw(uint8_t* base, const DrawCall& call) {
     stats.draws++;
+    DrawTimer timer(draw_profile);
     Dev d{base, call.device};
     uint32_t vs_obj = d.u32(0x3190), ps_obj = d.u32(0x318C), decl = d.u32(0x2E24);
     if (!vs_obj || !call.count) return;
@@ -1317,6 +1435,7 @@ struct Renderer::Impl {
     // SQ_CONTEXT_MISC.PARAM_GEN_POS.
     uint32_t param_gen = (d.reg(0x2180) >> 18) & 1 ? (d.reg(0x2181) >> 8) & 0xFF : 0xFF;
     ShaderEntry::PsVariant* psv = pse ? GetPixelShader(*pse, param_gen) : nullptr;
+    timer.Mark(DrawProfile::Mirror);
     ID3D11PixelShader* ps = psv ? psv->ps.Get() : nullptr;
     bool memexport = vsv->info.uses_memexport;
     if (memexport) stats.exports++;
@@ -1338,6 +1457,7 @@ struct Renderer::Impl {
       EnsureMirror(vfetch[slot * 2] & 0x1FFFFFFC, vfetch[slot * 2 + 1] & 0x03FFFFFC);
     }
 
+    timer.Mark(DrawProfile::States);
     TargetSetup t;
     SetupTargets(d, t, depth_only || (memexport && !ps));
     float ndc[4], zxform[4] = {1.0f, 0.0f, 0.0f, 0.0f};
@@ -1426,9 +1546,11 @@ struct Renderer::Impl {
       if (psv) log_tex(psv->info.textures, "ps");
     }
 
+    timer.Mark(DrawProfile::Constants);
     // Constants.
     UploadFloatConstants(cb_vs_float.Get(), d, 0x780, vse.parsed);
     if (pse) UploadFloatConstants(cb_ps_float.Get(), d, 0x1780, pse->parsed);
+    timer.Mark(DrawProfile::StateBuild);
     XeState st = {};
     for (int i = 0; i < 8; i++) st.bools[i] = d.u32(0x2780 + i * 4);
     for (int i = 0; i < 32; i++) st.loops[i] = d.u32(0x27A0 + i * 4);
@@ -1462,6 +1584,7 @@ struct Renderer::Impl {
                     d.reg(0x2180), d.reg(0x2181), st.tex[0][0], st.tex_dim[0][0]);
     }
 
+    timer.Mark(DrawProfile::Bind);
     // Shaders and resources.
     ctx->VSSetShader(vsv->vs.Get(), nullptr, 0);
     ID3D11Buffer* vcbs[2] = {cb_vs_float.Get(), cb_vs_state.Get()};
@@ -1484,6 +1607,7 @@ struct Renderer::Impl {
                                                      nullptr);
     }
 
+    timer.Mark(DrawProfile::Submit);
     // Primitive topology and indices.
     uint32_t prim = call.primitive;
     D3D11_PRIMITIVE_TOPOLOGY topo = D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
@@ -1517,7 +1641,8 @@ struct Renderer::Impl {
       stats.submitted++;
     } else {
       // Indices: copied from guest memory (byte swapped), or generated for fans / quads.
-      std::vector<uint32_t> idx;
+      std::vector<uint32_t>& idx = index_scratch;
+      idx.clear();
       idx.reserve(call.count);
       if (call.indexed) {
         uint32_t ib = d.u32(0x308C);
@@ -1549,7 +1674,8 @@ struct Renderer::Impl {
       }
       if (export_only) {
       } else if (prim == 5) {
-        std::vector<uint32_t> l;
+        std::vector<uint32_t>& l = index_scratch2;
+        l.clear();
         for (uint32_t i = 1; i + 1 < idx.size(); i++) {
           l.push_back(idx[0]);
           l.push_back(idx[i]);
@@ -1557,7 +1683,8 @@ struct Renderer::Impl {
         }
         idx.swap(l);
       } else if (prim == 13) {
-        std::vector<uint32_t> l;
+        std::vector<uint32_t>& l = index_scratch2;
+        l.clear();
         for (uint32_t i = 0; i + 3 < idx.size(); i += 4) {
           uint32_t q[6] = {idx[i], idx[i + 1], idx[i + 2], idx[i], idx[i + 2], idx[i + 3]};
           l.insert(l.end(), q, q + 6);
@@ -1587,7 +1714,13 @@ struct Renderer::Impl {
       ctx->DrawIndexed(uint32_t(idx.size()), 0, 0);
       stats.submitted++;
     }
-    Unbind(memexport);
+    timer.Mark(DrawProfile::Unbind);
+    // Clearing every shader resource slot after each draw cost more than the draw. The next draw
+    // binds all slots again, and D3D11 unbinds a texture by itself when it becomes a render
+    // target, so only memexport draws (memory UAV) need the full unbind. FS3_NO_LAZY_UNBIND=1.
+    static const bool lazy_unbind = !std::getenv("FS3_NO_LAZY_UNBIND");
+    if (!lazy_unbind || memexport) Unbind(memexport);
+    else ctx->GSSetShader(nullptr, nullptr, 0);
     if (memexport) MarkExportStreams(d);
     if (tracing() && memexport) TraceExport(d);
     if (tracing() && trace_dumps && t.color[0] && !t.color[0]->depth && trace_index < 400) {
@@ -1947,8 +2080,36 @@ struct Renderer::Impl {
     }
   }
 
+  // Diagnostics: FS3_TWEAK="<hex guest address>=<float>,..." writes big-endian floats into guest
+  // memory every frame once FS3_TWEAK_AFTER seconds (default 0) have passed.
+  void ApplyTweakOverrides(uint8_t* base) {
+    static const std::vector<std::pair<uint32_t, float>> list = [] {
+      std::vector<std::pair<uint32_t, float>> v;
+      if (const char* e = std::getenv("FS3_TWEAK")) {
+        std::string t(e);
+        size_t pos = 0;
+        while (pos < t.size()) {
+          size_t end = t.find(',', pos);
+          std::string item = t.substr(pos, end == std::string::npos ? std::string::npos : end - pos);
+          size_t eq = item.find('=');
+          if (eq != std::string::npos)
+            v.push_back({uint32_t(std::strtoul(item.c_str(), nullptr, 16)), std::strtof(item.c_str() + eq + 1, nullptr)});
+          if (end == std::string::npos) break;
+          pos = end + 1;
+        }
+      }
+      return v;
+    }();
+    if (list.empty() || !base) return;
+    static const double after = std::getenv("FS3_TWEAK_AFTER") ? std::atof(std::getenv("FS3_TWEAK_AFTER")) : 0.0;
+    if (std::chrono::duration<double>(std::chrono::steady_clock::now() - start_time).count() < after) return;
+    for (auto& [addr, value] : list) {
+      uint32_t bits = std::byteswap(std::bit_cast<uint32_t>(value));
+      std::memcpy(base + addr, &bits, 4);
+    }
+  }
+
   void Present(uint8_t* base) {
-    (void)base;
     if (tracing()) REXLOG_INFO("fs3trace: present (frame {})", frames);
     if (trace_at >= 0 && std::chrono::duration<double>(std::chrono::steady_clock::now() - start_time).count() >= trace_at) {
       trace_frame = frames + 1;
@@ -1956,6 +2117,8 @@ struct Renderer::Impl {
     }
     frames++;
     trace_index = 0;
+    draw_profile.Frame();
+    ApplyTweakOverrides(base);
     // Export streams not rewritten for a few frames have been released.
     for (auto it = exported.begin(); it != exported.end();)
       it = frames - it->second.second > 4 ? exported.erase(it) : std::next(it);
@@ -2001,6 +2164,12 @@ struct Renderer::Impl {
     // Front buffers come from resolves, so 8_8_8_8 ones are in BGRA order (see Resolve).
     picture.swap_rb = e->format == DXGI_FORMAT_R8G8B8A8_UNORM;
     if (!EnsureSwapChain()) return;
+    // A new internal resolution from the settings menu takes effect from the next frame: targets
+    // and textures of another scale are recreated as they are used.
+    if (float s = pcs::ResolutionScale(); s != scale) {
+      REXLOG_INFO("[native-gfx] internal resolution x{:.3f} -> x{:.3f}", scale, s);
+      scale = s;
+    }
     pcs::Present(dev.Get(), ctx.Get(), swap.Get(), picture,
                  [this](ID3D11RenderTargetView** rtv, uint32_t* w, uint32_t* h) {
                    if (!EnsureSwapChain()) return false;
