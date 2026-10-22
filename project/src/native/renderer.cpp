@@ -326,12 +326,16 @@ struct DrawProfile {
                                                 "unbind"};
   bool enabled = std::getenv("FS3_PROFILE") != nullptr;
   double ms[Count] = {};
-  uint64_t draws = 0, frames = 0;
+  uint64_t draws = 0, frames = 0, compiles = 0;
+  double compile_ms = 0, worst_frame_ms = 0;
+  std::chrono::steady_clock::time_point last_frame = std::chrono::steady_clock::now();
   std::chrono::steady_clock::time_point window = std::chrono::steady_clock::now();
   void Frame() {
     if (!enabled) return;
     ++frames;
     auto now = std::chrono::steady_clock::now();
+    worst_frame_ms = std::max(worst_frame_ms, std::chrono::duration<double, std::milli>(now - last_frame).count());
+    last_frame = now;
     if (now - window < std::chrono::seconds(5)) return;
     std::string line;
     double total = 0;
@@ -342,10 +346,11 @@ struct DrawProfile {
       total += ms[i];
     }
     double secs = std::chrono::duration<double>(now - window).count();
-    REXLOG_INFO("fs3 profile: fps={:.1f} draws/frame={:.0f} draw ms/frame={:.3f}{}", frames / secs,
-                double(draws) / frames, total / frames, line);
+    REXLOG_INFO("fs3 profile: fps={:.1f} worst={:.1f}ms shader compiles={} ({:.0f} ms) draws/frame={:.0f} draw ms/frame={:.3f}{}",
+                frames / secs, worst_frame_ms, compiles, compile_ms, double(draws) / frames, total / frames, line);
     for (double& v : ms) v = 0;
-    draws = frames = 0;
+    draws = frames = compiles = 0;
+    compile_ms = worst_frame_ms = 0;
     window = now;
   }
 };
@@ -473,7 +478,49 @@ struct Renderer::Impl {
   }
 
   // --- compile ---
+  // Compiled shaders are kept on disk (<exe dir>/cache/fs3_shaders), keyed by a hash of the HLSL
+  // source, entry and target: FXC takes 10-100 ms per shader, which stalled the first frames of
+  // every scene (entering a match compiles dozens). A translator change changes the source, so
+  // stale entries are never used. FS3_NO_SHADER_CACHE=1 disables it.
+  std::wstring shader_cache_dir;
+  decltype(&D3DCreateBlob) create_blob = nullptr;
+
   ComPtr<ID3DBlob> Compile(const std::string& src, const char* entry, const char* target, std::string* err) {
+    std::wstring cache_file;
+    if (!shader_cache_dir.empty() && create_blob) {
+      uint64_t h = HashBytes(src.data(), src.size());
+      h = HashBytes(entry, std::strlen(entry), h);
+      h = HashBytes(target, std::strlen(target), h);
+      wchar_t name[64];
+      std::swprintf(name, 64, L"\\%016llx_%zx.dxbc", (unsigned long long)h, src.size());
+      cache_file = shader_cache_dir + name;
+      if (FILE* f = _wfopen(cache_file.c_str(), L"rb")) {
+        std::fseek(f, 0, SEEK_END);
+        long n = std::ftell(f);
+        std::fseek(f, 0, SEEK_SET);
+        ComPtr<ID3DBlob> blob;
+        bool ok = n > 0 && SUCCEEDED(create_blob(size_t(n), &blob)) &&
+                  std::fread(blob->GetBufferPointer(), 1, size_t(n), f) == size_t(n);
+        std::fclose(f);
+        if (ok) return blob;
+      }
+    }
+    auto compile_start = std::chrono::steady_clock::now();
+    ComPtr<ID3DBlob> code = CompileUncached(src, entry, target, err);
+    draw_profile.compiles++;
+    draw_profile.compile_ms += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - compile_start).count();
+    if (code && !cache_file.empty()) {
+      std::wstring tmp = cache_file + L".tmp";
+      if (FILE* f = _wfopen(tmp.c_str(), L"wb")) {
+        bool ok = std::fwrite(code->GetBufferPointer(), 1, code->GetBufferSize(), f) == code->GetBufferSize();
+        std::fclose(f);
+        if (!ok || !MoveFileExW(tmp.c_str(), cache_file.c_str(), MOVEFILE_REPLACE_EXISTING)) DeleteFileW(tmp.c_str());
+      }
+    }
+    return code;
+  }
+
+  ComPtr<ID3DBlob> CompileUncached(const std::string& src, const char* entry, const char* target, std::string* err) {
     ComPtr<ID3DBlob> code, errors;
     HRESULT hr = CompileGuarded(compile, src, entry, target, D3DCOMPILE_OPTIMIZATION_LEVEL1, &code, &errors);
     if (FAILED(hr)) {
@@ -503,6 +550,21 @@ struct Renderer::Impl {
     if (!fxc) return false;
     compile = reinterpret_cast<pD3DCompile>(GetProcAddress(fxc, "D3DCompile"));
     if (!compile) return false;
+    create_blob = reinterpret_cast<decltype(&D3DCreateBlob)>(GetProcAddress(fxc, "D3DCreateBlob"));
+    if (!std::getenv("FS3_NO_SHADER_CACHE")) {
+      wchar_t exe[MAX_PATH];
+      DWORD n = GetModuleFileNameW(nullptr, exe, MAX_PATH);
+      if (n && n < MAX_PATH) {
+        std::wstring dir(exe, n);
+        dir.resize(dir.find_last_of(L"\\/") + 1);
+        dir += L"cache";
+        CreateDirectoryW(dir.c_str(), nullptr);
+        dir += L"\\fs3_shaders";
+        CreateDirectoryW(dir.c_str(), nullptr);
+        DWORD attr = GetFileAttributesW(dir.c_str());
+        if (attr != INVALID_FILE_ATTRIBUTES && (attr & FILE_ATTRIBUTE_DIRECTORY)) shader_cache_dir = dir;
+      }
+    }
     // PC settings: graphics API (Direct3D 11 or Vulkan) and card chosen in the settings menu.
     pcs::Configure(PcGameInfo(), false);
     ComPtr<ID3D11Device> d;
