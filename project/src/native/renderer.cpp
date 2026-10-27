@@ -393,6 +393,22 @@ struct Renderer::Impl {
   // pixels.
   float scale = 1.0f;
   float ScaleFor(uint32_t width) const { return width >= 640 ? scale : 1.0f; }
+  // MSAA from the settings menu, on the same scene-sized targets as the internal resolution.
+  uint32_t msaa_samples = 1, msaa_wanted = 0;
+  uint32_t SamplesFor(uint32_t width) const { return width >= 640 ? msaa_samples : 1; }
+  void UpdateMsaa() {
+    uint32_t want = uint32_t(pcs::MsaaSamples());
+    if (want == msaa_wanted) return;
+    msaa_wanted = want;
+    uint32_t m = pcs::SupportedSamples(dev.Get(), want,
+                                 {DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_FORMAT_R10G10B10A2_UNORM,
+                                  DXGI_FORMAT_R16G16B16A16_FLOAT, DXGI_FORMAT_R16G16_SNORM,
+                                  DXGI_FORMAT_R16G16B16A16_SNORM, DXGI_FORMAT_R16G16_FLOAT, DXGI_FORMAT_R32_FLOAT,
+                                  DXGI_FORMAT_R32G32_FLOAT, DXGI_FORMAT_D24_UNORM_S8_UINT,
+                                  DXGI_FORMAT_D32_FLOAT_S8X24_UINT});
+    if (m != msaa_samples) REXLOG_INFO("[native-gfx] MSAA {}x -> {}x (asked {}x)", msaa_samples, m, want);
+    msaa_samples = m;
+  }
   static uint32_t ScaledSize(uint32_t v, float s) {
     return std::max<uint32_t>(1, uint32_t(std::ceil(float(v) * s - 0.001f)));
   }
@@ -579,6 +595,7 @@ struct Renderer::Impl {
     d.As(&dev);
     c.As(&ctx);
     if (!dev || !ctx) return false;
+    UpdateMsaa();
 
     D3D11_BUFFER_DESC bd = {};
     bd.ByteWidth = kPhysicalSize;
@@ -844,10 +861,12 @@ struct Renderer::Impl {
     uint32_t samples = msaa == 0 ? 1 : (msaa == 1 ? 2 : 4);
     width = std::max({width, pitch, 1u});
     height = std::max(height, 1u);
+    samples = std::max(samples, SamplesFor(width));
     uint64_t key = uint64_t(base) | (uint64_t(format) << 12) | (uint64_t(pitch) << 16) | (uint64_t(msaa) << 30) |
                    (uint64_t(depth) << 32);
     auto& rt = render_targets[key];
-    if (rt.tex && rt.width >= width && rt.height >= height && rt.scale == ScaleFor(std::max(width, rt.width)))
+    if (rt.tex && rt.width >= width && rt.height >= height && rt.scale == ScaleFor(std::max(width, rt.width)) &&
+        rt.samples == samples)
       return &rt;
     RenderTarget n;
     n.width = std::max(width, rt.width);
@@ -2232,6 +2251,8 @@ struct Renderer::Impl {
       REXLOG_INFO("[native-gfx] internal resolution x{:.3f} -> x{:.3f}", scale, s);
       scale = s;
     }
+    // MSAA likewise: targets of another sample count are recreated as they are used.
+    UpdateMsaa();
     pcs::Present(dev.Get(), ctx.Get(), swap.Get(), picture,
                  [this](ID3D11RenderTargetView** rtv, uint32_t* w, uint32_t* h) {
                    if (!EnsureSwapChain()) return false;
