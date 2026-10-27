@@ -15,6 +15,7 @@ set(FIFASTREET3_SOURCES
     src/main.cpp
     src/pc_settings.cpp
     src/pc_theme.cpp
+    src/post_effects.cpp
     src/native/gfx_system.cpp
     src/native/renderer.cpp
     src/native/guest_texture.cpp
