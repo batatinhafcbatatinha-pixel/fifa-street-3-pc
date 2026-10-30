@@ -193,6 +193,7 @@ void NativeAudioSystem::WorkerMain() {
   const double stall_test = stall_env ? std::atof(stall_env) : 0.0;
   const auto worker_start = last_progress;
   bool stall_test_done = false;
+  auto clock_next = last_progress;
   while (running_) {
     if (log && std::chrono::steady_clock::now() - log_start >= std::chrono::seconds(1)) {
       auto x = XmaEngine::Get().TakeStats();
@@ -245,7 +246,14 @@ void NativeAudioSystem::WorkerMain() {
       dispatcher_->Execute(thread->thread_state(), due[i][0], args, 1);
       callbacks++;
     }
-    if (!device_ || stalled) std::this_thread::sleep_for(std::chrono::microseconds(5333));
+    if (!device_ || stalled) {
+      // One 256-sample frame per 5.333 ms, on a fixed schedule (a plain sleep after the
+      // callbacks ran slower than the 48 kHz clock).
+      const auto now = std::chrono::steady_clock::now();
+      if (now - clock_next > std::chrono::milliseconds(50)) clock_next = now;
+      clock_next += std::chrono::nanoseconds(5333333);
+      std::this_thread::sleep_until(clock_next);
+    }
   }
 }
 
