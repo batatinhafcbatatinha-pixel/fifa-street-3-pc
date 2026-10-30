@@ -1,0 +1,13 @@
+{
+  "schema": 1,
+  "name": "FIFA Street 3",
+  "revision": "Xbox 360, USA, TitleID 4541083B",
+  "filesystem": "xdvdfs",
+  "destination": "game_files",
+  "required_files": {
+    "default.xex": "1b4cd0fd2973fdea5f4f8b4907c6db67fb061c4173193c22144dd027b0a5d792"
+  },
+  "required_paths": [
+    "data"
+  ]
+}
