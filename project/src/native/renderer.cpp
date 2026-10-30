@@ -440,6 +440,17 @@ struct Renderer::Impl {
   ComPtr<ID3D11Buffer> cb_vs_float, cb_ps_float, cb_vs_state, cb_ps_state, cb_copy;
   ComPtr<ID3D11Buffer> index_ring;
   uint32_t index_ring_size = 16 << 20, index_ring_pos = 0;
+  // Converted index buffers of indexed lists/strips, valid while the write watch shows their
+  // guest pages untouched (generation sum). Buffers rewritten on consecutive frames go back
+  // to the ring. FS3_NO_INDEX_CACHE=1: always convert into the ring.
+  struct IndexCacheEntry {
+    ComPtr<ID3D11Buffer> buffer;
+    uint64_t gen = 0, last_used = 0, last_built = 0;
+    uint32_t streak = 0;
+    bool dynamic = false;
+    std::vector<uint8_t> check;  // FS3_INDEX_CACHE_CHECK=1: the guest bytes, compared on every hit
+  };
+  std::unordered_map<uint64_t, IndexCacheEntry> index_cache;
 
   std::unordered_map<uint32_t, std::shared_ptr<ShaderEntry>> shaders;  // by guest object
   std::unordered_map<uint64_t, std::shared_ptr<ShaderEntry>> shaders_by_hash;
@@ -1735,10 +1746,47 @@ struct Renderer::Impl {
     ctx->IASetPrimitiveTopology(topo);
     ctx->IASetInputLayout(nullptr);
 
-    if (!call.indexed && !convert) {
+    static const bool cache_indices = !std::getenv("FS3_NO_INDEX_CACHE");
+    IndexCacheEntry* cached = nullptr;
+    uint32_t cached_ib = 0, cached_addr = 0, cached_phys = 0, cached_bytes = 0;
+    bool cached_is32 = false;
+    if (cache_indices && call.indexed && !convert && !export_only && call.count && call.count <= (1u << 20)) {
+      cached_ib = d.u32(0x308C);
+      if (cached_ib) {
+        cached_is32 = (Be32(G(base, cached_ib)) >> 31) != 0;
+        cached_addr = Be32(G(base, cached_ib + 0x18)) + call.start * (cached_is32 ? 4u : 2u);
+        cached_bytes = call.count * (cached_is32 ? 4u : 2u);
+        cached_phys = memory->GetPhysicalAddress(cached_addr);
+        const bool reset = ((d.reg(0x2205) >> 21) & 1) && (prim == 3 || prim == 6);
+        const uint64_t key_parts[] = {cached_phys, call.count, uint64_t(cached_is32),
+                                      reset ? uint64_t(d.reg(0x2103) & (cached_is32 ? 0xFFFFFFu : 0xFFFFu)) + 1 : 0};
+        auto& e = index_cache[XXH3_64bits(key_parts, sizeof(key_parts))];
+        if (!e.dynamic && cached_phys < kPhysicalSize && cached_phys + cached_bytes <= kPhysicalSize) cached = &e;
+      }
+    }
+    static const bool check_indices = std::getenv("FS3_INDEX_CACHE_CHECK") != nullptr;
+    if (cached && cached->buffer && GenSum(cached_phys, cached_bytes) == cached->gen && check_indices &&
+        (cached->check.size() != cached_bytes || std::memcmp(cached->check.data(), G(base, cached_addr), cached_bytes))) {
+      static uint32_t misses = 0;
+      REXLOG_WARN("[native-gfx] index cache MISS #{} at {:08X} ({} bytes)", ++misses, cached_phys, cached_bytes);
+      cached->gen = ~0ull;
+    }
+    if (cached && cached->buffer && GenSum(cached_phys, cached_bytes) == cached->gen) {
+      cached->last_used = frames;
+      ctx->IASetIndexBuffer(cached->buffer.Get(), DXGI_FORMAT_R32_UINT, 0);
+      ctx->DrawIndexed(call.count, 0, 0);
+      stats.submitted++;
+    } else if (!call.indexed && !convert) {
       ctx->Draw(call.count, 0);
       stats.submitted++;
     } else {
+      // A cached buffer is rebuilt from pages protected first: a write racing the copy below
+      // bumps the generation and is seen at the next draw.
+      bool drawn = false;
+      if (cached) {
+        Watch(cached_phys, cached_bytes);
+        cached->gen = GenSum(cached_phys, cached_bytes);
+      }
       // Indices: copied from guest memory (byte swapped), or generated for fans / quads.
       std::vector<uint32_t>& idx = index_scratch;
       idx.clear();
@@ -1791,27 +1839,46 @@ struct Renderer::Impl {
         idx.swap(l);
       }
       if (convert) ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-      uint32_t bytes = uint32_t(idx.size() * 4);
-      if (!bytes || bytes > index_ring_size) {
-        Unbind(memexport);
-        return;
+      if (cached) {
+        cached->streak = cached->buffer && cached->last_built + 1 >= frames ? cached->streak + 1 : 0;
+        cached->dynamic = cached->streak >= 4;
+        cached->last_built = cached->last_used = frames;
+        if (check_indices) cached->check.assign(G(base, cached_addr), G(base, cached_addr) + cached_bytes);
+        D3D11_BUFFER_DESC desc{uint32_t(idx.size() * 4), D3D11_USAGE_DEFAULT, D3D11_BIND_INDEX_BUFFER, 0, 0, 0};
+        D3D11_SUBRESOURCE_DATA init{idx.data(), 0, 0};
+        if (cached->buffer) ctx->UpdateSubresource(cached->buffer.Get(), 0, nullptr, idx.data(), 0, 0);
+        else dev->CreateBuffer(&desc, &init, &cached->buffer);
+        if (cached->buffer) {
+          ctx->IASetIndexBuffer(cached->buffer.Get(), DXGI_FORMAT_R32_UINT, 0);
+          ctx->DrawIndexed(uint32_t(idx.size()), 0, 0);
+          stats.submitted++;
+          cached = nullptr;
+          drawn = true;
+        }
       }
-      D3D11_MAP map = D3D11_MAP_WRITE_NO_OVERWRITE;
-      if (index_ring_pos + bytes > index_ring_size) {
-        index_ring_pos = 0;
-        map = D3D11_MAP_WRITE_DISCARD;
+      if (!drawn) {
+        uint32_t bytes = uint32_t(idx.size() * 4);
+        if (!bytes || bytes > index_ring_size) {
+          Unbind(memexport);
+          return;
+        }
+        D3D11_MAP map = D3D11_MAP_WRITE_NO_OVERWRITE;
+        if (index_ring_pos + bytes > index_ring_size) {
+          index_ring_pos = 0;
+          map = D3D11_MAP_WRITE_DISCARD;
+        }
+        D3D11_MAPPED_SUBRESOURCE m;
+        if (FAILED(ctx->Map(index_ring.Get(), 0, map, 0, &m))) {
+          Unbind(memexport);
+          return;
+        }
+        std::memcpy(static_cast<uint8_t*>(m.pData) + index_ring_pos, idx.data(), bytes);
+        ctx->Unmap(index_ring.Get(), 0);
+        ctx->IASetIndexBuffer(index_ring.Get(), DXGI_FORMAT_R32_UINT, index_ring_pos);
+        index_ring_pos += bytes;
+        ctx->DrawIndexed(uint32_t(idx.size()), 0, 0);
+        stats.submitted++;
       }
-      D3D11_MAPPED_SUBRESOURCE m;
-      if (FAILED(ctx->Map(index_ring.Get(), 0, map, 0, &m))) {
-        Unbind(memexport);
-        return;
-      }
-      std::memcpy(static_cast<uint8_t*>(m.pData) + index_ring_pos, idx.data(), bytes);
-      ctx->Unmap(index_ring.Get(), 0);
-      ctx->IASetIndexBuffer(index_ring.Get(), DXGI_FORMAT_R32_UINT, index_ring_pos);
-      index_ring_pos += bytes;
-      ctx->DrawIndexed(uint32_t(idx.size()), 0, 0);
-      stats.submitted++;
     }
     timer.Mark(DrawProfile::Unbind);
     // Clearing every shader resource slot after each draw cost more than the draw. The next draw
@@ -2217,6 +2284,9 @@ struct Renderer::Impl {
     frames++;
     trace_index = 0;
     draw_profile.Frame();
+    if ((frames & 255) == 0)
+      for (auto it = index_cache.begin(); it != index_cache.end();)
+        it = frames - it->second.last_used > 600 ? index_cache.erase(it) : std::next(it);
     ApplyTweakOverrides(base);
     // Export streams not rewritten for a few frames have been released.
     for (auto it = exported.begin(); it != exported.end();)
