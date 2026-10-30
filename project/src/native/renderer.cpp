@@ -1,3 +1,5 @@
+#include "../platform/native_byteorder.h"
+#include "../platform/native_host_window.h"
 // Native D3D11 renderer for the game's Direct3D (Xbox 360) API calls. See renderer.h.
 
 #define NOMINMAX
@@ -6,8 +8,8 @@
 #include <windows.h>
 #include <d3d11_1.h>
 #include <dxgi1_2.h>
-#include <d3dcompiler.h>
-#include <wrl/client.h>
+#include "../platform/native_shader_compiler.h"
+#include "../platform/native_com_ptr.h"
 
 #include <algorithm>
 #include <bit>
@@ -24,6 +26,7 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
+#include <fstream>
 
 #include <rex/logging.h>
 #include <xxhash.h>
@@ -48,8 +51,8 @@ constexpr uint32_t kPageShift = 12;
 constexpr uint32_t kPhysicalSize = 0x20000000;
 constexpr uint32_t kPageCount = kPhysicalSize >> kPageShift;
 
-inline uint32_t Be32(const uint8_t* p) { return _byteswap_ulong(*reinterpret_cast<const uint32_t*>(p)); }
-inline uint16_t Be16(const uint8_t* p) { return _byteswap_ushort(*reinterpret_cast<const uint16_t*>(p)); }
+inline uint32_t Be32(const uint8_t* p) { return native_host::ByteSwap32(*reinterpret_cast<const uint32_t*>(p)); }
+inline uint16_t Be16(const uint8_t* p) { return native_host::ByteSwap16(*reinterpret_cast<const uint16_t*>(p)); }
 inline float BeF(const uint8_t* p) {
   uint32_t v = Be32(p);
   float f;
@@ -309,11 +312,15 @@ void main(triangle XeInterp v[3], inout TriangleStream<XeInterp> s) {
 HRESULT CompileGuarded(pD3DCompile compile, const std::string& src, const char* entry, const char* target,
                        UINT flags, ID3DBlob** code, ID3DBlob** errors) {
   HRESULT hr = E_FAIL;
+#ifdef _WIN32
   __try {
+#endif
     hr = compile(src.data(), src.size(), "fs3", nullptr, nullptr, entry, target, flags, 0, code, errors);
+#ifdef _WIN32
   } __except (EXCEPTION_EXECUTE_HANDLER) {
     hr = E_FAIL;
   }
+#endif
   return hr;
 }
 
@@ -498,27 +505,26 @@ struct Renderer::Impl {
   // source, entry and target: FXC takes 10-100 ms per shader, which stalled the first frames of
   // every scene (entering a match compiles dozens). A translator change changes the source, so
   // stale entries are never used. FS3_NO_SHADER_CACHE=1 disables it.
-  std::wstring shader_cache_dir;
+  std::filesystem::path shader_cache_dir;
   decltype(&D3DCreateBlob) create_blob = nullptr;
 
   ComPtr<ID3DBlob> Compile(const std::string& src, const char* entry, const char* target, std::string* err) {
-    std::wstring cache_file;
+    std::filesystem::path cache_file;
     if (!shader_cache_dir.empty() && create_blob) {
       uint64_t h = HashBytes(src.data(), src.size());
       h = HashBytes(entry, std::strlen(entry), h);
       h = HashBytes(target, std::strlen(target), h);
-      wchar_t name[64];
-      std::swprintf(name, 64, L"\\%016llx_%zx.dxbc", (unsigned long long)h, src.size());
-      cache_file = shader_cache_dir + name;
-      if (FILE* f = _wfopen(cache_file.c_str(), L"rb")) {
-        std::fseek(f, 0, SEEK_END);
-        long n = std::ftell(f);
-        std::fseek(f, 0, SEEK_SET);
+      char name[64];
+      std::snprintf(name, sizeof(name), "%016llx_%zx.dxbc", (unsigned long long)h, src.size());
+      cache_file = shader_cache_dir / name;
+      std::ifstream file(cache_file, std::ios::binary | std::ios::ate);
+      if (file) {
+        const auto size = file.tellg();
         ComPtr<ID3DBlob> blob;
-        bool ok = n > 0 && SUCCEEDED(create_blob(size_t(n), &blob)) &&
-                  std::fread(blob->GetBufferPointer(), 1, size_t(n), f) == size_t(n);
-        std::fclose(f);
-        if (ok) return blob;
+        if (size > 0 && size <= 64 * 1024 * 1024 && SUCCEEDED(create_blob(size_t(size), &blob))) {
+          file.seekg(0);
+          if (file.read(static_cast<char*>(blob->GetBufferPointer()), size)) return blob;
+        }
       }
     }
     auto compile_start = std::chrono::steady_clock::now();
@@ -526,12 +532,21 @@ struct Renderer::Impl {
     draw_profile.compiles++;
     draw_profile.compile_ms += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - compile_start).count();
     if (code && !cache_file.empty()) {
-      std::wstring tmp = cache_file + L".tmp";
-      if (FILE* f = _wfopen(tmp.c_str(), L"wb")) {
-        bool ok = std::fwrite(code->GetBufferPointer(), 1, code->GetBufferSize(), f) == code->GetBufferSize();
-        std::fclose(f);
-        if (!ok || !MoveFileExW(tmp.c_str(), cache_file.c_str(), MOVEFILE_REPLACE_EXISTING)) DeleteFileW(tmp.c_str());
-      }
+      auto tmp = cache_file;
+      tmp += ".tmp";
+      std::ofstream file(tmp, std::ios::binary | std::ios::trunc);
+      file.write(static_cast<const char*>(code->GetBufferPointer()), code->GetBufferSize());
+      file.close();
+      std::error_code error;
+      if (file) {
+#ifdef _WIN32
+        if (!MoveFileExW(tmp.c_str(), cache_file.c_str(), MOVEFILE_REPLACE_EXISTING))
+          std::filesystem::remove(tmp, error);
+#else
+        std::filesystem::rename(tmp, cache_file, error);
+        if (error) std::filesystem::remove(tmp, error);
+#endif
+      } else std::filesystem::remove(tmp, error);
     }
     return code;
   }
@@ -562,24 +577,24 @@ struct Renderer::Impl {
     if (const char* v = std::getenv("FS3_TRACE_DUMPS")) trace_dumps = *v && *v != '0';
     if (const char* v = std::getenv("FS3_DEBUG_NODEPTH")) debug_nodepth = *v && *v != '0';
     if (const char* v = std::getenv("FS3_DEBUG_PS")) debug_ps = uint32_t(std::strtoul(v, nullptr, 10));
+#ifdef _WIN32
     HMODULE fxc = LoadLibraryW(L"d3dcompiler_47.dll");
     if (!fxc) return false;
     compile = reinterpret_cast<pD3DCompile>(GetProcAddress(fxc, "D3DCompile"));
     if (!compile) return false;
     create_blob = reinterpret_cast<decltype(&D3DCreateBlob)>(GetProcAddress(fxc, "D3DCreateBlob"));
+#else
+    compile = &D3DCompile;
+    create_blob = &D3DCreateBlob;
+#endif
     if (!std::getenv("FS3_NO_SHADER_CACHE")) {
-      wchar_t exe[MAX_PATH];
-      DWORD n = GetModuleFileNameW(nullptr, exe, MAX_PATH);
-      if (n && n < MAX_PATH) {
-        std::wstring dir(exe, n);
-        dir.resize(dir.find_last_of(L"\\/") + 1);
-        dir += L"cache";
-        CreateDirectoryW(dir.c_str(), nullptr);
-        dir += L"\\fs3_shaders";
-        CreateDirectoryW(dir.c_str(), nullptr);
-        DWORD attr = GetFileAttributesW(dir.c_str());
-        if (attr != INVALID_FILE_ATTRIBUTES && (attr & FILE_ATTRIBUTE_DIRECTORY)) shader_cache_dir = dir;
-      }
+      auto dir = native_host::ExecutableDirectory() / "cache" / "fs3_shaders";
+#ifndef _WIN32
+      dir /= "vkd3d";
+#endif
+      std::error_code error;
+      std::filesystem::create_directories(dir, error);
+      if (!error) shader_cache_dir = dir;
     }
     // PC settings: graphics API (Direct3D 11 or Vulkan) and card chosen in the settings menu.
     pcs::Configure(PcGameInfo(), false);
@@ -2268,7 +2283,7 @@ struct Renderer::Impl {
     if (!hwnd) {
       auto* runtime = rex::Runtime::instance();
       if (auto* window = runtime ? runtime->display_window() : nullptr)
-        hwnd = static_cast<HWND>(window->GetNativeWindowHandle());
+        hwnd = static_cast<HWND>(native_host::WindowHandle(window));
       if (!hwnd) return false;
     }
     RECT rc;
@@ -2400,7 +2415,7 @@ void Renderer::SignalFences(uint8_t* base, uint32_t device) {
   EnableGpulessMode(base, device);
   uint32_t counter = Be32(G(base, device + 0x2A9C));
   uint32_t target = Be32(G(base, device + 0x2A90));
-  if (target) *reinterpret_cast<uint32_t*>(rex::memory::GuestPtr(base, target)) = _byteswap_ulong(counter);
+  if (target) *reinterpret_cast<uint32_t*>(rex::memory::GuestPtr(base, target)) = native_host::ByteSwap32(counter);
 }
 
 double Renderer::frames_per_second() const { return impl_->fps.load(); }

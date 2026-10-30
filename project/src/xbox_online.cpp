@@ -1,3 +1,4 @@
+#include "platform/native_byteorder.h"
 // Xbox LIVE / network layer for the Xbox 360 ports (master copy: work/xbox-online; copied into
 // each port's src/). The SDK's network exports are stubs that tell the game there is no network
 // cable (XNetGetEthernetLinkStatus = 0), no address and no DNS. With online play switched on
@@ -15,10 +16,25 @@
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
+#ifdef _WIN32
 #define _WINSOCK_DEPRECATED_NO_WARNINGS
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <iphlpapi.h>
+#else
+#include <arpa/inet.h>
+#include <cerrno>
+#include <dirent.h>
+#include <fstream>
+#include <ifaddrs.h>
+#include <net/if.h>
+#include <netdb.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+#include <unistd.h>
+#include <windows.h>
+#include "platform/native_win32_posix.h"
+#endif
 
 #include <atomic>
 #include <cstdlib>
@@ -38,8 +54,32 @@
 #include <rex/system/xthread.h>
 #include <rex/system/xtypes.h>
 
+#ifdef _WIN32
 #pragma comment(lib, "iphlpapi.lib")
 #pragma comment(lib, "ws2_32.lib")
+#else
+// The guest sees Windows socket error codes; map the host's errno to them.
+int WSAGetLastError() {
+  switch (errno) {
+    case EWOULDBLOCK: return 10035;   // WSAEWOULDBLOCK
+    case EINPROGRESS: return 10036;   // WSAEINPROGRESS
+    case EALREADY: return 10037;      // WSAEALREADY
+    case ENOTSOCK: return 10038;      // WSAENOTSOCK
+    case EMSGSIZE: return 10040;      // WSAEMSGSIZE
+    case EADDRINUSE: return 10048;    // WSAEADDRINUSE
+    case EADDRNOTAVAIL: return 10049; // WSAEADDRNOTAVAIL
+    case ENETUNREACH: return 10051;   // WSAENETUNREACH
+    case ECONNABORTED: return 10053;  // WSAECONNABORTED
+    case ECONNRESET: return 10054;    // WSAECONNRESET
+    case EISCONN: return 10056;       // WSAEISCONN
+    case ENOTCONN: return 10057;      // WSAENOTCONN
+    case ETIMEDOUT: return 10060;     // WSAETIMEDOUT
+    case ECONNREFUSED: return 10061;  // WSAECONNREFUSED
+    case EHOSTUNREACH: return 10065;  // WSAEHOSTUNREACH
+    default: return errno ? 10022 : 0;  // WSAEINVAL
+  }
+}
+#endif
 
 namespace {
 
@@ -56,6 +96,23 @@ bool OnlineEnabled() {
     if (const char* e = std::getenv("PCS_ONLINE"); e && *e) return *e != '0';
     wchar_t ini[MAX_PATH];
     GetModuleFileNameW(nullptr, ini, MAX_PATH);
+#ifndef _WIN32
+    if (wchar_t* slash = wcsrchr(ini, L'/')) *slash = 0;
+    // Any *-pc.ini next to the executable (the port's settings file).
+    bool found = false;
+    if (DIR* dir = opendir(std::string(ini, ini + wcslen(ini)).c_str())) {
+      while (dirent* e = readdir(dir)) {
+        std::string name = e->d_name;
+        if (name.size() > 7 && name.compare(name.size() - 7, 7, "-pc.ini") == 0) {
+          std::wstring path = std::wstring(ini) + L"/" + std::wstring(name.begin(), name.end());
+          found = GetPrivateProfileIntW(L"opcoes", L"online", 0, path.c_str()) != 0;
+          break;
+        }
+      }
+      closedir(dir);
+    }
+    return found;
+#else
     if (wchar_t* slash = wcsrchr(ini, L'\\')) *slash = 0;
     // Any *-pc.ini next to the executable (the port's settings file).
     WIN32_FIND_DATAW fd;
@@ -68,6 +125,7 @@ bool OnlineEnabled() {
       FindClose(find);
     }
     return enabled;
+#endif
   }();
   return on;
 }
@@ -92,6 +150,23 @@ struct HostIdentity {
 const HostIdentity& Host() {
   static const HostIdentity id = [] {
     HostIdentity h;
+#ifndef _WIN32
+    ifaddrs* list = nullptr;
+    if (getifaddrs(&list) == 0) {
+      for (ifaddrs* a = list; a; a = a->ifa_next) {
+        if (!a->ifa_addr || a->ifa_addr->sa_family != AF_INET || !(a->ifa_flags & IFF_UP) || (a->ifa_flags & IFF_LOOPBACK))
+          continue;
+        h.ip = reinterpret_cast<sockaddr_in*>(a->ifa_addr)->sin_addr.s_addr;
+        std::ifstream mac(std::string("/sys/class/net/") + a->ifa_name + "/address");
+        unsigned m[6];
+        std::string text;
+        if (mac >> text && std::sscanf(text.c_str(), "%x:%x:%x:%x:%x:%x", &m[0], &m[1], &m[2], &m[3], &m[4], &m[5]) == 6)
+          for (int i = 0; i < 6; ++i) h.mac[i] = uint8_t(m[i]);
+        break;
+      }
+      freeifaddrs(list);
+    }
+#else
     ULONG size = 16 * 1024;
     std::vector<uint8_t> buffer(size);
     auto* list = reinterpret_cast<IP_ADAPTER_ADDRESSES*>(buffer.data());
@@ -106,6 +181,7 @@ const HostIdentity& Host() {
         break;
       }
     }
+#endif
     char text[32];
     inet_ntop(AF_INET, &h.ip, text, sizeof(text));
     REXLOG_INFO("[online] console address {} (MAC {:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X})", text, h.mac[0],
@@ -219,7 +295,7 @@ REX_HOOK_RAW(__imp__NetDll_XNetXnAddrToInAddr) {
 
 // XNetInAddrToXnAddr(caller, IN_ADDR, XNADDR* out, XNKID* out)
 REX_HOOK_RAW(__imp__NetDll_XNetInAddrToXnAddr) {
-  const uint32_t ina = _byteswap_ulong(ctx.r4.u32), xnaddr = ctx.r5.u32, xnkid = ctx.r6.u32;
+  const uint32_t ina = native_host::ByteSwap32(ctx.r4.u32), xnaddr = ctx.r5.u32, xnkid = ctx.r6.u32;
   if (!OnlineEnabled() || !xnaddr) {
     ctx.r3.u64 = 1;
     return;

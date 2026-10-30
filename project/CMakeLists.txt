@@ -37,13 +37,18 @@ else()
 endif()
 
 rexglue_setup_target(fifastreet3)
-target_link_libraries(fifastreet3 PRIVATE d3d11 dxgi rex::xxhash rex::libavcodec rex::libavutil)
+target_link_libraries(fifastreet3 PRIVATE rex::xxhash rex::libavcodec rex::libavutil)
+if(WIN32)
+    target_link_libraries(fifastreet3 PRIVATE d3d11 dxgi)
+endif()
 # Public headers of the SDK's FFmpeg build (LGPL 2.1, see third_party/ffmpeg) for the XMA decoder.
 target_include_directories(fifastreet3 PRIVATE third_party/ffmpeg/include)
 
 # Offline check of the Xenos -> HLSL translator (compiles the extracted shaders with FXC).
-add_executable(fs3_shader_test tools/shader_test.cpp src/native/xenos_hlsl.cpp)
-target_link_libraries(fs3_shader_test PRIVATE rex::runtime)
+if(WIN32)
+    add_executable(fs3_shader_test tools/shader_test.cpp src/native/xenos_hlsl.cpp)
+    target_link_libraries(fs3_shader_test PRIVATE rex::runtime)
+endif()
 
 # Vulkan option of the settings menu: DXVK's d3d11.dll/dxgi.dll in vulkan\ next to the
 # executable (pc_settings.cpp loads them by full path when "API grafica" is Vulkan).
@@ -59,4 +64,14 @@ if(WIN32 AND EXISTS "${DXVK_DIR}/x64/d3d11.dll")
             COMMAND ${CMAKE_COMMAND} -E copy_if_different "${DXVK_DIR}/LICENSE"
                     "$<TARGET_FILE_DIR:fifastreet3>/vulkan/LICENSE.dxvk.txt")
     endif()
+endif()
+
+# Native HLSL compiler for Linux (no Windows compiler DLL).
+include(src/platform/native_shader_compiler.cmake)
+if(TARGET native_shader_compiler)
+    foreach(_native_target IN ITEMS fifastreet3)
+        if(TARGET ${_native_target})
+            target_link_libraries(${_native_target} PRIVATE native_shader_compiler)
+        endif()
+    endforeach()
 endif()
