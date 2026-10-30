@@ -64,8 +64,31 @@ struct BITMAPINFO { BITMAPINFOHEADER bmiHeader; RGBQUAD bmiColors[1]; };
 #define VK_UP 0x26
 #define VK_RIGHT 0x27
 #define VK_DOWN 0x28
+#define VK_TAB 0x09
+#define VK_SHIFT 0x10
+#define VK_CONTROL 0x11
+#define VK_MENU 0x12
+#define VK_PRIOR 0x21
+#define VK_NEXT 0x22
+#define VK_END 0x23
+#define VK_HOME 0x24
+#define VK_DELETE 0x2E
 #define VK_F1 0x70
+#define VK_F2 0x71
+#define VK_F3 0x72
+#define VK_F4 0x73
+#define VK_F5 0x74
+#define VK_F6 0x75
+#define VK_F7 0x76
+#define VK_F8 0x77
+#define VK_F9 0x78
+#define VK_F10 0x79
 #define VK_F11 0x7A
+#define VK_F12 0x7B
+#define VK_LSHIFT 0xA0
+#define VK_RSHIFT 0xA1
+#define VK_LCONTROL 0xA2
+#define VK_RCONTROL 0xA3
 
 #ifndef ERROR_SUCCESS
 #define ERROR_SUCCESS 0
@@ -147,7 +170,39 @@ DWORD GetTickCount();
 void Sleep(DWORD ms);
 // No XInput or DXVK DLLs to load on Linux: pads come through the SDK's SDL input, D3D11 is DXVK native.
 inline HMODULE LoadLibraryW(const wchar_t*) { return nullptr; }
-inline void* GetProcAddress(HMODULE, const char*) { return nullptr; }
+// rexruntime*.dll -> the SDK runtime shared library already loaded in the process; other modules: none.
+HMODULE GetModuleHandleW(const wchar_t* name);
+void* GetProcAddress(HMODULE module, const char* name);
+// Keyboard state of a Windows virtual key (bit 15 = down), from SDL's keyboard state.
+SHORT GetAsyncKeyState(int vk);
+#ifndef E_UNEXPECTED
+#define E_UNEXPECTED ((HRESULT)0x8000FFFFL)
+#endif
+#define CP_UTF8 65001
+#define CP_ACP 0
+int WideCharToMultiByte(UINT codepage, DWORD flags, const wchar_t* src, int n, char* dst, int dst_n, const char*, BOOL*);
+int MultiByteToWideChar(UINT codepage, DWORD flags, const char* src, int n, wchar_t* dst, int dst_n);
+#define sscanf_s sscanf
+inline unsigned long long _strtoui64(const char* s, char** end, int base) { return std::strtoull(s, end, base); }
+inline long long _strtoi64(const char* s, char** end, int base) { return std::strtoll(s, end, base); }
+struct SYSTEMTIME { WORD wYear, wMonth, wDayOfWeek, wDay, wHour, wMinute, wSecond, wMilliseconds; };
+void GetLocalTime(SYSTEMTIME* t);
+#pragma pack(push, 2)
+struct BITMAPFILEHEADER { WORD bfType; DWORD bfSize; WORD bfReserved1; WORD bfReserved2; DWORD bfOffBits; };
+#pragma pack(pop)
+#ifndef D3D11_FILTER_REDUCTION_TYPE_STANDARD
+#define D3D11_FILTER_REDUCTION_TYPE_STANDARD 0  // DXVK native's D3D11_ENCODE_BASIC_FILTER takes the comparison flag
+#endif
+#define PAGE_NOACCESS 0x01
+#define PAGE_READONLY 0x02
+#define PAGE_READWRITE 0x04
+// mprotect on the page range (addresses page-aligned as on Windows); returns FALSE on failure.
+BOOL VirtualProtect(void* address, SIZE_T size, DWORD protect, DWORD* old_protect);
+DWORD GetCurrentThreadId();
+using MMRESULT = UINT;
+inline MMRESULT timeBeginPeriod(UINT) { return 0; }  // POSIX sleeps are already fine-grained
+inline MMRESULT timeEndPeriod(UINT) { return 0; }
+inline int _strnicmp(const char* a, const char* b, size_t n) { return strncasecmp(a, b, n); }
 #ifndef CloseHandle
 inline BOOL NativeCloseHandle(HANDLE) { return TRUE; }
 #define CloseHandle NativeCloseHandle

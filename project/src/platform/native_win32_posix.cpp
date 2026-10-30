@@ -23,6 +23,10 @@
 #include <sstream>
 #include <string>
 #include <thread>
+#include <ctime>
+#include <dlfcn.h>
+#include <sys/mman.h>
+#include <sys/syscall.h>
 #include <unistd.h>
 #include <vector>
 
@@ -570,6 +574,103 @@ WORD GetUserDefaultUILanguage() {
   if (is("ru")) return LANG_RUSSIAN;
   return LANG_ENGLISH;
 }
+
+HMODULE GetModuleHandleW(const wchar_t* name) {
+  if (!name) return dlopen(nullptr, RTLD_NOW);
+  std::string n = Narrow(name);
+  for (auto& c : n) c = char(std::tolower((unsigned char)c));
+  if (n.rfind("rexruntime", 0) != 0) return nullptr;
+  for (const char* so : {"librexruntimerd.so", "librexruntime.so", "librexruntimed.so"})
+    if (void* h = dlopen(so, RTLD_NOW | RTLD_NOLOAD)) return h;
+  return nullptr;
+}
+
+void* GetProcAddress(HMODULE module, const char* name) { return module && name ? dlsym(module, name) : nullptr; }
+
+SHORT GetAsyncKeyState(int vk) {
+  SDL_Scancode sc = SDL_SCANCODE_UNKNOWN;
+  if (vk >= 'A' && vk <= 'Z') sc = SDL_Scancode(SDL_SCANCODE_A + (vk - 'A'));
+  else if (vk >= '1' && vk <= '9') sc = SDL_Scancode(SDL_SCANCODE_1 + (vk - '1'));
+  else if (vk == '0') sc = SDL_SCANCODE_0;
+  else if (vk >= VK_F1 && vk <= VK_F12) sc = SDL_Scancode(SDL_SCANCODE_F1 + (vk - VK_F1));
+  else {
+    switch (vk) {
+      case VK_BACK: sc = SDL_SCANCODE_BACKSPACE; break;
+      case VK_TAB: sc = SDL_SCANCODE_TAB; break;
+      case VK_RETURN: sc = SDL_SCANCODE_RETURN; break;
+      case VK_ESCAPE: sc = SDL_SCANCODE_ESCAPE; break;
+      case VK_SPACE: sc = SDL_SCANCODE_SPACE; break;
+      case VK_LEFT: sc = SDL_SCANCODE_LEFT; break;
+      case VK_UP: sc = SDL_SCANCODE_UP; break;
+      case VK_RIGHT: sc = SDL_SCANCODE_RIGHT; break;
+      case VK_DOWN: sc = SDL_SCANCODE_DOWN; break;
+      case VK_PRIOR: sc = SDL_SCANCODE_PAGEUP; break;
+      case VK_NEXT: sc = SDL_SCANCODE_PAGEDOWN; break;
+      case VK_HOME: sc = SDL_SCANCODE_HOME; break;
+      case VK_END: sc = SDL_SCANCODE_END; break;
+      case VK_DELETE: sc = SDL_SCANCODE_DELETE; break;
+      case VK_LSHIFT: sc = SDL_SCANCODE_LSHIFT; break;
+      case VK_RSHIFT: sc = SDL_SCANCODE_RSHIFT; break;
+      case VK_LCONTROL: sc = SDL_SCANCODE_LCTRL; break;
+      case VK_RCONTROL: sc = SDL_SCANCODE_RCTRL; break;
+      default: break;
+    }
+  }
+  int count = 0;
+  const bool* keys = SDL_GetKeyboardState(&count);
+  auto down = [&](SDL_Scancode s) { return keys && int(s) < count && keys[s]; };
+  bool pressed = false;
+  if (vk == VK_SHIFT) pressed = down(SDL_SCANCODE_LSHIFT) || down(SDL_SCANCODE_RSHIFT);
+  else if (vk == VK_CONTROL) pressed = down(SDL_SCANCODE_LCTRL) || down(SDL_SCANCODE_RCTRL);
+  else if (vk == VK_MENU) pressed = down(SDL_SCANCODE_LALT) || down(SDL_SCANCODE_RALT);
+  else if (sc != SDL_SCANCODE_UNKNOWN) pressed = down(sc);
+  return pressed ? SHORT(0x8000) : SHORT(0);
+}
+
+int WideCharToMultiByte(UINT, DWORD, const wchar_t* src, int n, char* dst, int dst_n, const char*, BOOL*) {
+  if (!src) return 0;
+  std::string out = Narrow(src, n);
+  if (n < 0) out.push_back('\0');  // -1: the terminator is converted too, as on Windows
+  if (!dst || dst_n == 0) return int(out.size());
+  int count = std::min(int(out.size()), dst_n);
+  std::memcpy(dst, out.data(), size_t(count));
+  return count;
+}
+
+int MultiByteToWideChar(UINT, DWORD, const char* src, int n, wchar_t* dst, int dst_n) {
+  if (!src) return 0;
+  std::wstring out = Widen(n < 0 ? std::string(src) : std::string(src, size_t(n)));
+  if (n < 0) out.push_back(L'\0');
+  if (!dst || dst_n == 0) return int(out.size());
+  int count = std::min(int(out.size()), dst_n);
+  std::wmemcpy(dst, out.data(), size_t(count));
+  return count;
+}
+
+void GetLocalTime(SYSTEMTIME* t) {
+  if (!t) return;
+  timespec ts{};
+  clock_gettime(CLOCK_REALTIME, &ts);
+  tm local{};
+  localtime_r(&ts.tv_sec, &local);
+  *t = {WORD(local.tm_year + 1900), WORD(local.tm_mon + 1), WORD(local.tm_wday), WORD(local.tm_mday),
+        WORD(local.tm_hour), WORD(local.tm_min), WORD(local.tm_sec), WORD(ts.tv_nsec / 1000000)};
+}
+
+BOOL VirtualProtect(void* address, SIZE_T size, DWORD protect, DWORD* old_protect) {
+  const uintptr_t page = uintptr_t(sysconf(_SC_PAGESIZE));
+  const uintptr_t start = uintptr_t(address) & ~(page - 1);
+  const uintptr_t end = (uintptr_t(address) + size + page - 1) & ~(page - 1);
+  int prot = protect == PAGE_NOACCESS ? PROT_NONE : protect == PAGE_READONLY ? PROT_READ : PROT_READ | PROT_WRITE;
+  if (old_protect) *old_protect = PAGE_READWRITE;  // callers restore read/write, the only state they set
+  if (mprotect(reinterpret_cast<void*>(start), end - start, prot) != 0) {
+    g_last_error = DWORD(errno);
+    return FALSE;
+  }
+  return TRUE;
+}
+
+DWORD GetCurrentThreadId() { return DWORD(syscall(SYS_gettid)); }
 
 DWORD GetLastError() { return g_last_error; }
 
