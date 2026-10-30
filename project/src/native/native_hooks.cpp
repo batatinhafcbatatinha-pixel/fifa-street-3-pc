@@ -23,6 +23,10 @@ REX_EXTERN(__imp__sub_8250AB58);  // Swap(device, front buffer texture, ...)
 REX_EXTERN(__imp__sub_82505678);  // one iteration of the D3D library's GPU wait loops
 REX_EXTERN(sub_8250A518);         // flip completion (normally run by the GPU interrupt)
 
+namespace fs3_natives {
+void FrameTick(uint64_t frame);
+}
+
 namespace fs3_performance {
 double FramesPerSecond() { return fs3gfx::Renderer::Get().frames_per_second(); }
 }
@@ -108,6 +112,8 @@ REX_HOOK_RAW(sub_82505678) {
 }
 
 REX_HOOK_RAW(sub_8250AB58) {
+  static uint64_t frames = 0;
+  fs3_natives::FrameTick(++frames);
   Renderer::Get().SetFrontBuffer(base, ctx.r4.u32);
   __imp__sub_8250AB58(ctx, base);
 }

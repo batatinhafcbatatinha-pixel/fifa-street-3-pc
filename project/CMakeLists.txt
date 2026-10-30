@@ -20,6 +20,7 @@ set(FIFASTREET3_SOURCES
     src/native/renderer.cpp
     src/native/guest_texture.cpp
     src/native/native_hooks.cpp
+    src/game_natives.cpp
     src/menu_hooks.cpp
     src/apt_menu.cpp
     src/timing_diag.cpp
