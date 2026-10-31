@@ -15,7 +15,7 @@ An experimental Xbox 360 FIFA Street 3 port built through static recompilation w
 - Graphics: the game's Direct3D library is intercepted at the API level and drawn by a native Direct3D 11 renderer. Xenos shader microcode is translated to HLSL. No GPU command processor, register file or emulation plugin is used.
 - Audio: the XMA and XAudio exports are reimplemented on the host (FFmpeg's XMA decoder plus a native mixer). No audio hardware model. A loopback capture through menus and a match measured continuous stereo output with no clipping, dropouts or decode failures; it has not yet been reviewed by ear.
 - The Xbox 360 kernel and XAM services (files, threads, memory, profiles, input) come from the ReXGlue runtime as an operating-system compatibility layer.
-- Windows x64 only for now. Online features are not supported.
+- Tested on Windows x64; a Linux build path exists. Experimental [macOS](MACOS.md) build files are included; they have not been compiled or run yet. Online features are not supported.
 
 ## Why a native port instead of an emulator
 
@@ -78,6 +78,10 @@ python3 tools/play.py --game-files game_files
 ```
 
 The build copies the SDK runtime, DXVK native and vkd3d-shader next to the executable (it finds them there).
+
+## Build on macOS
+
+Experimental and not compiled or run yet: see [MACOS.md](MACOS.md).
 
 ## Keyboard controls
 
