@@ -67,5 +67,6 @@ class Fifastreet3App : public rex::ReXApp {
         return input;
       };
     }
+    pcs::InstallPadTap(config);
   }
 };

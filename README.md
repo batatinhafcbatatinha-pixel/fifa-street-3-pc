@@ -43,6 +43,10 @@ default.xex  1b4cd0fd2973fdea5f4f8b4907c6db67fb061c4173193c22144dd027b0a5d792
 
 The validator checks the hash and that the `data` folder is present. Do not upload the ISO, extracted files, generated code or the built executable.
 
+## Controllers
+
+Xbox pads and every pad SDL knows work in the game and in the PC settings menu: DualShock 3/4, DualSense, Switch pads, USB adapters for PS2 and original Xbox pads. `tools/build_local.py` downloads `gamecontrollerdb.txt` (SDL_GameControllerDB, zlib license) next to the executable, so generic adapters get their button names. Only Xbox-type input was tested; no PlayStation pad or adapter has been tried on real hardware yet.
+
 ## Build on Windows
 
 Requirements: Python 3.10+, Visual Studio 2022 Build Tools (C++ workload, Windows SDK), LLVM/Clang 20 or newer (a complete install that includes the clang resource headers), CMake 3.25+ and Ninja.
