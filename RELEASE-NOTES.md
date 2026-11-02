@@ -1,7 +1,19 @@
 Source kit only: no game, no XEX, no generated code and no executable. Bring your own Xbox 360 USA disc.
 
+**v0.2.2**
+
+- Measured in a match at 4K, 8x MSAA, 16x anisotropic filtering, no frame limit: about 148 fps, minimum 120 (Ryzen 5 3600, RTX 3050 Laptop).
+- Native render-list sort comparator and memcpy; converted index buffers cached while their pages are untouched; audio clock on a fixed schedule.
+- PC settings menu reads every SDL pad; controller mappings sit next to the executable.
+- The game keeps running when the audio device stops consuming.
+- Experimental macOS build files (not compiled or run yet) and a native Linux build path (not built for this release).
+
+Nobody has played this exact build through.
+
+**Earlier**
+
 - **Keyboard play:** the keyboard plays as an Xbox controller with EA SPORTS FC 27's default WASD layout (WASD move, L pass, ; shoot, K lob/cross, O through ball, P sprint, I change player, Esc pause; Enter passes PRESS START).
 - Native Direct3D 11 renderer and native XMA audio; no GPU or audio-hardware emulation.
 - `tools/extract_iso.py` + `tools/validate_game.py`: extract your disc and verify the supported revision by SHA-256.
 - `tools/build_local.py`: downloads the pinned ReXGlue SDK, translates your XEX locally and builds the port.
-- Tested on Windows 11 x64: boot, menus, saves and full matches at 55-60 fps. Audio measured clean (no clipping, dropouts or decode failures) but not yet reviewed by ear.
+- Tested on Windows 11 x64: boot, menus, saves and full matches. Audio measured clean (no clipping, dropouts or decode failures) but not yet reviewed by ear.
