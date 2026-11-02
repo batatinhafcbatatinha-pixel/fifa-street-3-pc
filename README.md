@@ -11,7 +11,7 @@ An experimental Xbox 360 FIFA Street 3 port built through static recompilation w
 
 ## Status
 
-- Tested on Windows 11 x64: boot, menus, profile/save, and a full match at 55–60 fps.
+- Tested on Windows 11 x64: boot, menus, profile/save, and a full match. Measured in a match at 4K with 8x MSAA, 16x anisotropic filtering and no frame limit: about 148 fps, minimum 120 (Ryzen 5 3600, RTX 3050 Laptop).
 - Graphics: the game's Direct3D library is intercepted at the API level and drawn by a native Direct3D 11 renderer. Xenos shader microcode is translated to HLSL. No GPU command processor, register file or emulation plugin is used.
 - Audio: the XMA and XAudio exports are reimplemented on the host (FFmpeg's XMA decoder plus a native mixer). No audio hardware model. A loopback capture through menus and a match measured continuous stereo output with no clipping, dropouts or decode failures; it has not yet been reviewed by ear.
 - The Xbox 360 kernel and XAM services (files, threads, memory, profiles, input) come from the ReXGlue runtime as an operating-system compatibility layer.
