@@ -116,7 +116,7 @@ sealed partial class MainForm {
       MakeButton(button, d.Only == null ? L.T("Montar", "Build") : L.T("Instalar", "Install"), Color.FromArgb(60, 96, 160), 120, 32);
       button.Font = Font;
       button.Margin = new Padding(3, 8, 3, 6);
-      button.Visible = d.Ok == false;
+      button.Visible = d.Ok == false && root != null;  // before the kit is downloaded only "install everything" works
       button.Tag = d;
       button.Click += (s, e) => InstallDep((Dep)((Button)s).Tag);
       depButtons.Add(button);
