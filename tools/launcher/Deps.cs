@@ -21,37 +21,32 @@ sealed partial class MainForm {
     public string Found;                // where it was found / why it is missing
   }
 
-  readonly TableLayoutPanel depsTable = new TableLayoutPanel();
-  readonly Label depsSummary = new Label();
-  readonly Button depsAllButton = new Button(), depsRecheckButton = new Button();
-  readonly List<Button> depButtons = new List<Button>();
+  TableLayoutPanel depsList;
+  Label depsSummary;
+  FlatButton depsAllButton, depsRecheckButton;
+  readonly List<FlatButton> depButtons = new List<FlatButton>();
   List<Dep> deps = new List<Dep>();
   bool depsChecking;
 
   void BuildDepsPage() {
-    var intro = new Label {
-      Dock = DockStyle.Top, Height = 46, ForeColor = Muted,
-      Text = L.T("O que a montagem do jogo precisa neste PC. O que faltar pode ser instalado item por item ou tudo de uma vez.",
-                 "What building the game needs on this PC. Anything missing can be installed one by one or all at once."),
-    };
-    var scroller = new Panel { Dock = DockStyle.Fill, AutoScroll = true };
-    depsTable.Dock = DockStyle.Top; depsTable.AutoSize = true; depsTable.ColumnCount = 4;
-    depsTable.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 330));
-    depsTable.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 150));
-    depsTable.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 120));
-    depsTable.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 140));
-    scroller.Controls.Add(depsTable);
-    depsSummary.Dock = DockStyle.Bottom; depsSummary.Height = 70; depsSummary.Padding = new Padding(4, 10, 4, 0);
-    var bottom = new FlowLayoutPanel { Dock = DockStyle.Bottom, Height = 52, FlowDirection = FlowDirection.RightToLeft, Padding = new Padding(0, 8, 0, 0) };
-    MakeButton(depsAllButton, L.T("Instalar tudo o que falta", "Install everything missing"), Accent, 260, 36);
-    depsAllButton.Click += (s, e) => Install();
-    MakeButton(depsRecheckButton, L.T("Verificar de novo", "Check again"), Panel2, 170, 36);
+    var stack = Stack(Theme.Bg);
+    stack.Controls.Add(Words(L.T("O que a montagem do jogo precisa neste PC. O que faltar pode ser instalado item por item ou tudo de uma vez.",
+                                "What building the game needs on this PC. Anything missing can be installed one by one or all at once."),
+                           Theme.UI(9.5f), Theme.Text3, new Padding(4, 0, 4, 14)));
+    depsList = AddCard(stack, out _);
+    var bottom = new TableLayoutPanel { Dock = DockStyle.Bottom, Height = 84, ColumnCount = 3, BackColor = Theme.Bg, Padding = new Padding(0, 14, 0, 0) };
+    bottom.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+    bottom.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+    bottom.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+    depsSummary = new Label { AutoSize = true, MaximumSize = new Size(470, 0), ForeColor = Theme.Text2, Anchor = AnchorStyles.Left, Margin = new Padding(4, 0, 12, 0) };
+    depsRecheckButton = new FlatButton(L.T("Verificar de novo", "Check again"), ButtonKind.Secondary, 170, 40) { Margin = new Padding(0, 0, 10, 0), Anchor = AnchorStyles.Right };
     depsRecheckButton.Click += (s, e) => CheckDeps();
-    bottom.Controls.Add(depsAllButton);
-    bottom.Controls.Add(depsRecheckButton);
-    pageDeps.Controls.Add(scroller);
-    pageDeps.Controls.Add(intro);
-    pageDeps.Controls.Add(depsSummary);
+    depsAllButton = new FlatButton(L.T("Instalar tudo o que falta", "Install everything missing"), ButtonKind.Primary, 240, 40) { Margin = Padding.Empty, Anchor = AnchorStyles.Right };
+    depsAllButton.Click += (s, e) => Install();
+    bottom.Controls.Add(depsSummary, 0, 0);
+    bottom.Controls.Add(depsRecheckButton, 1, 0);
+    bottom.Controls.Add(depsAllButton, 2, 0);
+    pageDeps.Controls.Add(Scroller(stack));
     pageDeps.Controls.Add(bottom);
   }
 
@@ -96,39 +91,49 @@ sealed partial class MainForm {
     RenderDeps();
   }
 
+
   void RenderDeps() {
-    depsTable.SuspendLayout();
-    depsTable.Controls.Clear();
-    depsTable.RowStyles.Clear();
-    depsTable.RowCount = 0;
+    depsList.SuspendLayout();
+    depsList.Controls.Clear();
     depButtons.Clear();
+    bool first = true;
     foreach (var d in deps) {
-      var name = new Label { AutoSize = true, MaximumSize = new Size(320, 0), Margin = new Padding(3, 10, 3, 6),
-                             Text = d.Name + "\n" + d.Detail };
-      name.Font = Font;
-      var state = new Label { AutoSize = true, Margin = new Padding(3, 10, 3, 6), MaximumSize = new Size(145, 0) };
-      if (d.Ok == null) { state.Text = L.T("verificando...", "checking..."); state.ForeColor = Muted; }
-      else if (d.Ok == true) { state.Text = "✔ " + L.T("instalado", "installed") + (string.IsNullOrEmpty(d.Found) ? "" : "\n" + d.Found); state.ForeColor = Accent; }
-      else { state.Text = "✖ " + L.T("falta", "missing") + (string.IsNullOrEmpty(d.Found) ? "" : "\n" + d.Found); state.ForeColor = Danger; }
-      var size = new Label { AutoSize = true, Margin = new Padding(3, 10, 3, 6), ForeColor = Muted,
-                             Text = d.Gb <= 0 ? "-" : (d.Gb < 1 ? $"~{Math.Max(1, (int)Math.Round(d.Gb * 1024))} MB" : $"~{d.Gb:0.#} GB") + (d.OnSystemDrive ? L.T("\nno C:", "\non C:") : "") };
-      var button = new Button();
-      MakeButton(button, d.Only == null ? L.T("Montar", "Build") : L.T("Instalar", "Install"), Color.FromArgb(60, 96, 160), 120, 32);
-      button.Font = Font;
-      button.Margin = new Padding(3, 8, 3, 6);
+      if (!first) depsList.Controls.Add(new Panel { Height = 1, BackColor = Theme.Border, Anchor = AnchorStyles.Left | AnchorStyles.Right, Margin = Padding.Empty });
+      first = false;
+      var row = new TableLayoutPanel { ColumnCount = 5, AutoSize = true, Anchor = AnchorStyles.Left | AnchorStyles.Right, BackColor = Theme.Surface, Margin = Padding.Empty, Padding = new Padding(0, 12, 0, 12) };
+      row.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 44));
+      row.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+      row.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 210));
+      row.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 96));
+      row.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 120));
+      var dot = new StatusDot { Ok = d.Ok, Anchor = AnchorStyles.Left, Margin = new Padding(0, 0, 0, 0) };
+      var name = Stack(Theme.Surface);
+      name.Dock = DockStyle.None; name.Anchor = AnchorStyles.Left | AnchorStyles.Right; name.Margin = new Padding(0, 0, 12, 0);
+      name.Controls.Add(Words(d.Name, Theme.Semi(10.5f), Theme.Text, new Padding(0, 0, 0, 2)));
+      name.Controls.Add(Words(d.Detail, Theme.UI(9f), Theme.Text3, Padding.Empty));
+      string stateText = d.Ok == null ? L.T("verificando...", "checking...")
+                       : d.Ok == true ? L.T("Instalado", "Installed") : L.T("Falta", "Missing");
+      var state = Stack(Theme.Surface);
+      state.Dock = DockStyle.None; state.Anchor = AnchorStyles.Left | AnchorStyles.Right; state.Margin = new Padding(0, 0, 8, 0);
+      state.Controls.Add(Words(stateText, Theme.Semi(10f), d.Ok == null ? Theme.Text3 : d.Ok == true ? Theme.Accent : Theme.Danger, new Padding(0, 0, 0, 2)));
+      if (!string.IsNullOrEmpty(d.Found)) state.Controls.Add(Words(d.Found, Theme.UI(9f), Theme.Text3, Padding.Empty));
+      string sizeText = d.Gb <= 0 ? "" : d.Gb < 1 ? $"~{Math.Max(1, (int)Math.Round(d.Gb * 1024))} MB" : $"~{d.Gb:0.#} GB";
+      var size = Stack(Theme.Surface);
+      size.Dock = DockStyle.None; size.Anchor = AnchorStyles.Left | AnchorStyles.Right;
+      size.Controls.Add(Words(sizeText, Theme.Semi(10f), Theme.Text2, new Padding(0, 0, 0, 2)));
+      if (d.OnSystemDrive && sizeText.Length > 0) size.Controls.Add(Words(L.T("no C:", "on C:"), Theme.UI(9f), Theme.Text3, Padding.Empty));
+      var button = new FlatButton(d.Only == null ? L.T("Montar", "Build") : L.T("Instalar", "Install"), ButtonKind.Blue, 112, 36) { Anchor = AnchorStyles.Right, Margin = Padding.Empty, Tag = d };
       button.Visible = d.Ok == false && root != null;  // before the kit is downloaded only "install everything" works
-      button.Tag = d;
-      button.Click += (s, e) => InstallDep((Dep)((Button)s).Tag);
+      button.Click += (s, e) => InstallDep((Dep)((Control)s).Tag);
       depButtons.Add(button);
-      // Fixed cells: a hidden button must not shift the next row's cells.
-      int row = depsTable.RowCount++;
-      depsTable.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-      depsTable.Controls.Add(name, 0, row);
-      depsTable.Controls.Add(state, 1, row);
-      depsTable.Controls.Add(size, 2, row);
-      depsTable.Controls.Add(button, 3, row);
+      row.Controls.Add(dot, 0, 0);
+      row.Controls.Add(name, 1, 0);
+      row.Controls.Add(state, 2, 0);
+      row.Controls.Add(size, 3, 0);
+      row.Controls.Add(button, 4, 0);
+      depsList.Controls.Add(row);
     }
-    depsTable.ResumeLayout();
+    depsList.ResumeLayout();
     UpdateDepsSummary();
     UpdateDepButtons();
   }
@@ -141,20 +146,21 @@ sealed partial class MainForm {
     string driveName = Path.GetPathRoot(folder);
     double freeHere = FreeGb(driveName), freeC = FreeGb(Path.GetPathRoot(Environment.SystemDirectory));
     bool sameDrive = string.Equals(driveName, Path.GetPathRoot(Environment.SystemDirectory), StringComparison.OrdinalIgnoreCase);
+    bool shortOfSpace = false;
     string text;
     if (deps.Any(d => d.Ok == null)) text = L.T("Verificando...", "Checking...");
     else if (missing.Count == 0) text = L.T("Tudo instalado.", "Everything is installed.");
     else {
-      text = L.T($"Faltam {missing.Count} itens. Espaço necessário: ~{here:0.#} GB em {driveName} (livre: {freeHere:0.#} GB)",
-                 $"{missing.Count} items missing. Space needed: ~{here:0.#} GB on {driveName} (free: {freeHere:0.#} GB)");
-      if (onC > 0) text += sameDrive ? L.T($" + ~{onC:0.#} GB do sistema = ~{here + onC:0.#} GB", $" + ~{onC:0.#} GB of system parts = ~{here + onC:0.#} GB")
-                                     : L.T($"; ~{onC:0.#} GB no C: (livre: {freeC:0.#} GB)", $"; ~{onC:0.#} GB on C: (free: {freeC:0.#} GB)");
+      text = L.T($"Faltam {missing.Count} itens: ~{here:0.#} GB em {driveName} (livre: {freeHere:0.#} GB)",
+                 $"{missing.Count} items missing: ~{here:0.#} GB on {driveName} (free: {freeHere:0.#} GB)");
+      if (onC > 0) text += sameDrive ? L.T($" + ~{onC:0.#} GB do sistema", $" + ~{onC:0.#} GB of system parts")
+                                     : L.T($" e ~{onC:0.#} GB no C: (livre: {freeC:0.#} GB)", $" and ~{onC:0.#} GB on C: (free: {freeC:0.#} GB)");
       text += ".";
-      bool short1 = sameDrive ? here + onC > freeHere : here > freeHere || onC > freeC;
-      if (short1) text += L.T("\nAtenção: falta espaço em disco.", "\nWarning: not enough disk space.");
+      shortOfSpace = sameDrive ? here + onC > freeHere : here > freeHere || onC > freeC;
+      if (shortOfSpace) text += L.T(" Falta espaço em disco.", " Not enough disk space.");
     }
     depsSummary.Text = text;
-    depsSummary.ForeColor = text.Contains("\n") ? Danger : Text1;
+    depsSummary.ForeColor = shortOfSpace ? Theme.Danger : missing.Count == 0 && !deps.Any(d => d.Ok == null) ? Theme.Accent : Theme.Text2;
   }
 
   static double FreeGb(string drive) {
@@ -162,6 +168,7 @@ sealed partial class MainForm {
   }
 
   void UpdateDepButtons() {
+    if (depsAllButton == null) return;
     bool busy = Busy;
     foreach (var b in depButtons) b.Enabled = !busy && root != null;
     depsAllButton.Enabled = !busy && deps.Any(d => d.Ok == false);
@@ -171,7 +178,7 @@ sealed partial class MainForm {
   void InstallDep(Dep d) {
     if (Busy || root == null) return;
     if (d.Only == null) { Install(); return; }
-    tabs.SelectedTab = pageInstall;
+    ShowPage(pageInstall);
     log.Clear();
     progress.Value = 0;
     RunSetup(d.Only);

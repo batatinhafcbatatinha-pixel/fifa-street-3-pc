@@ -1,5 +1,9 @@
 Source kit and `Setup.exe` (our installer and launcher): no game, no XEX, no generated code, no game executable. Bring your own Xbox 360 USA disc.
 
+**v0.2.6**
+
+- **`Setup.exe` redesigned:** dark and light themes (the default follows Windows; the choice is in the header), controls drawn by the launcher itself (no more dark text on dark, white borders or Windows sliders), settings in cards with each option's explanation under it, on/off switches, and a status mark for each dependency.
+
 **v0.2.5**
 
 - **`Setup.exe`**: download it alone and run it. It fetches this source kit, shows on its *Dependencies* tab what your PC has and what is missing (Python, C++ Build Tools, LLVM/CMake/Ninja, your game files, the built game) with the space each part needs, installs each part or everything, and builds the game. Afterwards it is the launcher: *Play*, and *PC settings* with the same options as the F1 menu, saved before the game starts. It is built by GitHub from `tools/launcher`; nothing from the game is in it. Windows may warn because it is not signed.

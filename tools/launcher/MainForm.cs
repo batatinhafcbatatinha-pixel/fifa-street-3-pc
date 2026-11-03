@@ -1,5 +1,5 @@
-// The launcher window: Play (status, install / repair, play), Install (the setup log) and
-// PC settings (the game's ini, the same file the in-game F1 menu uses).
+// The launcher window: Play (status, install / repair, play), Dependencies, Install (the setup log) and
+// PC settings (the game's ini, the same file the in-game F1 menu uses). Drawn with Theme's controls.
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -14,97 +14,123 @@ using System.Windows.Forms;
 namespace PortLauncher {
 
 sealed partial class MainForm : Form {
-  static readonly Color Back = Color.FromArgb(24, 26, 30), Panel2 = Color.FromArgb(34, 37, 43),
-      Text1 = Color.FromArgb(230, 232, 236), Muted = Color.FromArgb(150, 156, 166),
-      Accent = Color.FromArgb(78, 160, 98), Danger = Color.FromArgb(200, 90, 80);
-
   readonly GameConfig cfg;
   string root;                // the kit folder (setup.json, tools\setup.ps1); null before download
   readonly string launcherPath = Application.ExecutablePath;
 
-  readonly TabControl tabs = new TabControl();
-  readonly TabPage pagePlay = new TabPage(), pageInstall = new TabPage(), pageSettings = new TabPage(), pageDeps = new TabPage();
-  readonly Label status = new Label(), statusDetail = new Label(), stepLabel = new Label(), help = new Label();
-  readonly Button playButton = new Button(), installButton = new Button(), folderButton = new Button();
-  readonly Button saveButton = new Button(), defaultsButton = new Button(), cancelButton = new Button();
-  readonly TextBox log = new TextBox(), folderBox = new TextBox();
-  readonly CheckBox shortcutBox = new CheckBox();
-  readonly ProgressBar progress = new ProgressBar();
-  readonly TableLayoutPanel settingsTable = new TableLayoutPanel();
-  readonly Label settingsNote = new Label();
+  // Set when the theme changes: Program opens the window again in the new colours.
+  public bool Restart;
+  public string RootForRestart => root;
+  public int PageForRestart => pages.IndexOf(current);
+
+  readonly Panel host = new Panel();
+  readonly List<Panel> pages = new List<Panel>();
+  readonly List<NavTab> navTabs = new List<NavTab>();
+  Panel current;
+  Panel pagePlay, pageDeps, pageInstall, pageSettings;
+
+  Label status, statusDetail, stepLabel, settingsNote, saveState;
+  FlatButton playButton, installButton, saveButton, defaultsButton, cancelButton;
+  TextBox log, folderBox;
+  Control folderRow;
+  ToggleSwitch shortcutBox;
+  ProgressLine progress;
   readonly Dictionary<Setting, Control> editors = new Dictionary<Setting, Control>();
-  readonly Dictionary<Setting, Label> labels = new Dictionary<Setting, Label>();
-  ComboBox monitorCombo, refreshCombo;
+  readonly Dictionary<Setting, Control> rows = new Dictionary<Setting, Control>();
+  ChoiceBox monitorCombo, refreshCombo;
   Process running;
-  bool dirty;
+  bool dirty, loading;
 
-  public MainForm(GameConfig config, string exeDir) {
+  public MainForm(GameConfig config, string kitDir, int page = 0) {
     cfg = config;
-    root = IsKit(exeDir) ? exeDir : null;
-    Text = cfg.Game + " - " + L.T("PC", "PC");
+    root = kitDir;
+    Text = cfg.Game + " - PC";
     try { Icon = Icon.ExtractAssociatedIcon(launcherPath); } catch (Exception) { }
-    Font = new Font("Segoe UI", 10f);
+    Font = Theme.UI(10f);
     AutoScaleMode = AutoScaleMode.Dpi;
-    ClientSize = new Size(920, 660);
-    MinimumSize = new Size(760, 560);
+    ClientSize = new Size(980, 660);
+    MinimumSize = new Size(840, 600);
     StartPosition = FormStartPosition.CenterScreen;
-    BackColor = Back;
-    ForeColor = Text1;
+    BackColor = Theme.Bg;
+    ForeColor = Theme.Text;
+    Theme.DarkTitle(this);
 
-    var header = new Panel { Dock = DockStyle.Top, Height = 86, BackColor = Panel2, Padding = new Padding(24, 14, 24, 10) };
-    var title = new Label { Text = cfg.Game.ToUpperInvariant(), Font = new Font("Segoe UI Semibold", 22f), AutoSize = true, Location = new Point(22, 10) };
+    // Header: title, subtitle, theme picker; the page tabs along its bottom edge.
+    var header = new Panel { Dock = DockStyle.Top, Height = 124, BackColor = Theme.Surface };
+    var title = new Label { Text = cfg.Game.ToUpperInvariant(), Font = Theme.Semi(21f), ForeColor = Theme.Text, AutoSize = true, Location = new Point(26, 14) };
     var sub = new Label {
       Text = L.T("Port para PC, montado a partir do seu próprio disco", "PC port, built from your own disc") +
-             (string.IsNullOrEmpty(cfg.Disc) ? "" : "  ·  " + cfg.Disc),
-      ForeColor = Muted, AutoSize = true, Location = new Point(26, 56) };
+             (string.IsNullOrEmpty(cfg.Disc) ? "" : "   ·   " + cfg.Disc),
+      ForeColor = Theme.Text3, AutoSize = true, Location = new Point(29, 56) };
+    var themeLabel = new Label { Text = L.T("Tema", "Theme"), ForeColor = Theme.Text3, AutoSize = true, Anchor = AnchorStyles.Top | AnchorStyles.Right };
+    var themeBox = new ChoiceBox { Width = 170, Height = 32, Anchor = AnchorStyles.Top | AnchorStyles.Right };
+    themeBox.Items.Add(new ChoiceBox.Entry { Value = 0, Text = L.T("Igual ao sistema", "Same as Windows") });
+    themeBox.Items.Add(new ChoiceBox.Entry { Value = 1, Text = L.T("Escuro", "Dark") });
+    themeBox.Items.Add(new ChoiceBox.Entry { Value = 2, Text = L.T("Claro", "Light") });
+    themeBox.Select(Theme.Mode == "dark" ? 1 : Theme.Mode == "light" ? 2 : 0, 0);
+    themeBox.SelectedIndexChanged += (s, e) => {
+      if (Busy) { Dialog.Info(this, Text, L.T("Espere terminar para trocar o tema.", "Wait for it to finish before changing the theme.")); return; }
+      Theme.Apply(themeBox.Selected.Value == 1 ? "dark" : themeBox.Selected.Value == 2 ? "light" : "system");
+      Theme.Save();
+      if (dirty && root != null) SaveSettings();
+      Restart = true;
+      Close();
+    };
     header.Controls.Add(title);
     header.Controls.Add(sub);
+    header.Controls.Add(themeLabel);
+    header.Controls.Add(themeBox);
+    header.Resize += (s, e) => {
+      themeBox.Location = new Point(header.ClientSize.Width - themeBox.Width - 26, 22);
+      themeLabel.Location = new Point(themeBox.Left - themeLabel.PreferredWidth - 10, 29);
+    };
+    var nav = new FlowLayoutPanel { Dock = DockStyle.Bottom, Height = 44, BackColor = Theme.Surface, Padding = new Padding(18, 0, 0, 0), WrapContents = false };
+    header.Controls.Add(nav);
+    var line = new Panel { Dock = DockStyle.Top, Height = 1, BackColor = Theme.Border };
 
-    tabs.Dock = DockStyle.Fill;
-    tabs.Padding = new Point(18, 6);
-    pagePlay.Text = L.T("Jogar", "Play");
-    pageInstall.Text = L.T("Instalação", "Install");
-    pageSettings.Text = L.T("Configurações do PC", "PC settings");
-    pageDeps.Text = L.T("Dependências", "Dependencies");
-    foreach (var p in new[] { pagePlay, pageDeps, pageInstall, pageSettings }) {
-      p.BackColor = Back; p.ForeColor = Text1; p.Padding = new Padding(24);
-      tabs.TabPages.Add(p);
-    }
+    host.Dock = DockStyle.Fill;
+    host.BackColor = Theme.Bg;
+    pagePlay = AddPage(nav, L.T("Jogar", "Play"));
+    pageDeps = AddPage(nav, L.T("Dependências", "Dependencies"));
+    pageInstall = AddPage(nav, L.T("Instalação", "Install"));
+    pageSettings = AddPage(nav, L.T("Configurações do PC", "PC settings"));
     BuildPlayPage();
+    BuildDepsPage();
     BuildInstallPage();
     BuildSettingsPage();
-    BuildDepsPage();
-    // Our own tab bar (the Windows tab strip cannot be themed dark): the pages' headers are hidden.
-    tabs.Appearance = TabAppearance.FlatButtons; tabs.ItemSize = new Size(0, 1); tabs.SizeMode = TabSizeMode.Fixed;
-    var nav = new FlowLayoutPanel { Dock = DockStyle.Top, Height = 46, BackColor = Panel2, Padding = new Padding(18, 0, 0, 0), WrapContents = false };
-    foreach (TabPage page in tabs.TabPages) {
-      var b = new Button { Text = page.Text, FlatStyle = FlatStyle.Flat, AutoSize = true, Height = 42, Tag = page,
-                           ForeColor = Muted, BackColor = Panel2, Margin = new Padding(0, 4, 4, 0), Padding = new Padding(10, 0, 10, 0),
-                           Font = new Font("Segoe UI Semibold", 10.5f), Cursor = Cursors.Hand };
-      b.FlatAppearance.BorderSize = 0;
-      b.FlatAppearance.MouseOverBackColor = Color.FromArgb(44, 48, 56);
-      b.Click += (o, e) => tabs.SelectedTab = (TabPage)((Button)o).Tag;
-      navButtons.Add(b);
-      nav.Controls.Add(b);
-    }
-    tabs.SelectedIndexChanged += (o, e) => PaintNav();
-    PaintNav();
-    Controls.Add(tabs);
-    Controls.Add(nav);
+
+    Controls.Add(host);
+    Controls.Add(line);
     Controls.Add(header);
-    tabs.SelectedIndexChanged += (s, e) => {
-      if (tabs.SelectedTab == pageSettings) LoadSettings();
-      if (tabs.SelectedTab == pageDeps) CheckDeps();
-    };
     FormClosing += OnClosing;
+    Shown += (s, e) => { ActiveControl = null; folderBox.SelectionLength = 0; };
+    ShowPage(pages[Math.Max(0, Math.Min(pages.Count - 1, page))]);
     RefreshStatus();
   }
 
-  readonly List<Button> navButtons = new List<Button>();
+  Panel AddPage(FlowLayoutPanel nav, string name) {
+    var page = new Panel { Dock = DockStyle.Fill, BackColor = Theme.Bg, Padding = new Padding(28, 22, 28, 20), Visible = false };
+    host.Controls.Add(page);
+    pages.Add(page);
+    var tab = new NavTab(name) { Tag = page };
+    tab.Click += (s, e) => ShowPage(page);
+    navTabs.Add(tab);
+    nav.Controls.Add(tab);
+    return page;
+  }
+
+  void ShowPage(Panel page) {
+    if (current == page) return;
+    current = page;
+    foreach (var p in pages) p.Visible = p == page;
+    foreach (var t in navTabs) t.Selected = t.Tag == page;
+    if (page == pageSettings) LoadSettings();
+    if (page == pageDeps) CheckDeps();
+  }
 
   public void ShotOnLoad(string file, int tab) {
     Shown += (o, e) => {
-      tabs.SelectedIndex = Math.Max(0, Math.Min(tabs.TabCount - 1, tab));
+      ShowPage(pages[Math.Max(0, Math.Min(pages.Count - 1, tab))]);
       var timer = new Timer { Interval = 5000 };
       timer.Tick += (t, a) => {
         timer.Stop();
@@ -118,91 +144,113 @@ sealed partial class MainForm : Form {
     };
   }
 
-  void PaintNav() {
-    foreach (var b in navButtons) {
-      bool on = b.Tag == tabs.SelectedTab;
-      b.ForeColor = on ? Text1 : Muted;
-      b.BackColor = on ? Back : Panel2;
-    }
-  }
-
   // "owner/fifa-street-3-pc" -> "fifa-street-3-pc": the folder name.
   string RepoName => string.IsNullOrEmpty(cfg.Repo) ? "game" : cfg.Repo.Substring(cfg.Repo.LastIndexOf('/') + 1);
 
-  static bool IsKit(string dir) => File.Exists(Path.Combine(dir, "setup.json")) && File.Exists(Path.Combine(dir, "tools", "setup.ps1"));
+  public static bool IsKit(string dir) => dir != null && File.Exists(Path.Combine(dir, "setup.json")) && File.Exists(Path.Combine(dir, "tools", "setup.ps1"));
   string GameExe => root == null || cfg.Exe == null ? null : Path.Combine(root, cfg.Exe);
   string IniPath => root == null || cfg.Ini == null ? null : Path.Combine(root, cfg.Ini);
   bool Installed => GameExe != null && File.Exists(GameExe);
   bool Busy => running != null && !running.HasExited;
+  bool SetupRunning => Busy && running.StartInfo.FileName.EndsWith("powershell.exe", StringComparison.OrdinalIgnoreCase);
 
-  static Button MakeButton(Button b, string text, Color back, int width = 220, int height = 44) {
-    b.Text = text; b.FlatStyle = FlatStyle.Flat; b.BackColor = back; b.ForeColor = Color.White;
-    b.FlatAppearance.BorderSize = 0; b.Size = new Size(width, height); b.Cursor = Cursors.Hand;
-    b.Font = new Font("Segoe UI Semibold", 11f);
-    return b;
+  // ------------------------------------------------------------------ layout helpers
+
+  // A vertical stack that fills its width; children with Anchor Left|Right stretch, labels wrap.
+  static TableLayoutPanel Stack(Color back) {
+    var t = new TableLayoutPanel { ColumnCount = 1, Dock = DockStyle.Top, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, BackColor = back, Margin = Padding.Empty, Padding = Padding.Empty };
+    t.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+    return t;
   }
+
+  static Label Words(string text, Font font, Color color, Padding margin) =>
+      new Label { Text = text, Font = font, ForeColor = color, AutoSize = true, Anchor = AnchorStyles.Left | AnchorStyles.Right, Margin = margin };
+
+  // A card holding a stack; returns the stack to fill.
+  static TableLayoutPanel AddCard(TableLayoutPanel parent, out Card card, Padding? margin = null) {
+    card = new Card { AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, Anchor = AnchorStyles.Left | AnchorStyles.Right, Margin = margin ?? new Padding(0, 0, 0, 16) };
+    var inner = Stack(Theme.Surface);
+    card.Controls.Add(inner);
+    parent.Controls.Add(card);
+    return inner;
+  }
+
+  static Panel Scroller(TableLayoutPanel content) {
+    var p = new Panel { Dock = DockStyle.Fill, AutoScroll = true, BackColor = Theme.Bg };
+    p.Controls.Add(content);
+    Theme.DarkScroll(p);
+    return p;
+  }
+
+  static FlowLayoutPanel Row(Color back, Padding margin) =>
+      new FlowLayoutPanel { AutoSize = true, WrapContents = false, BackColor = back, Margin = margin, Padding = Padding.Empty };
 
   // ------------------------------------------------------------------ Play page
 
   void BuildPlayPage() {
-    var flow = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.TopDown, WrapContents = false, AutoScroll = true };
-    status.AutoSize = true; status.Font = new Font("Segoe UI Semibold", 14f);
-    statusDetail.AutoSize = true; statusDetail.ForeColor = Muted; statusDetail.MaximumSize = new Size(800, 0);
-    statusDetail.Margin = new Padding(3, 6, 3, 18);
-    flow.Controls.Add(status);
-    flow.Controls.Add(statusDetail);
+    var stack = Stack(Theme.Bg);
+    var main = AddCard(stack, out _);
+    status = Words("", Theme.Semi(16f), Theme.Text, new Padding(0, 0, 0, 4));
+    statusDetail = Words("", Theme.UI(10f), Theme.Text2, new Padding(0, 0, 0, 16));
+    main.Controls.Add(status);
+    main.Controls.Add(statusDetail);
 
-    var folderRow = new FlowLayoutPanel { AutoSize = true, WrapContents = false, Margin = new Padding(0, 0, 0, 10) };
-    var folderLabel = new Label { Text = L.T("Pasta de instalação:", "Install folder:"), AutoSize = true, Margin = new Padding(3, 8, 6, 0) };
-    folderBox.Width = 460; folderBox.BackColor = Panel2; folderBox.ForeColor = Text1; folderBox.BorderStyle = BorderStyle.FixedSingle;
-    folderBox.Margin = new Padding(3, 5, 6, 0);
-    MakeButton(folderButton, L.T("Escolher...", "Browse..."), Panel2, 110, 32);
-    folderButton.Font = Font;
-    folderButton.Click += (s, e) => {
+    // Install folder (only before the kit is downloaded).
+    var folder = new TableLayoutPanel { ColumnCount = 2, AutoSize = true, Anchor = AnchorStyles.Left | AnchorStyles.Right, BackColor = Theme.Surface, Margin = new Padding(0, 0, 0, 16) };
+    folder.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+    folder.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+    var folderLabel = Words(L.T("Pasta de instalação", "Install folder"), Theme.Semi(9.5f), Theme.Text3, new Padding(0, 0, 0, 6));
+    folder.Controls.Add(folderLabel, 0, 0);
+    folder.SetColumnSpan(folderLabel, 2);
+    var field = new Card { BackColor = Theme.Surface2, Height = 38, Padding = new Padding(12, 9, 12, 6), Anchor = AnchorStyles.Left | AnchorStyles.Right, Margin = new Padding(0, 0, 10, 0) };
+    folderBox = new TextBox { BorderStyle = BorderStyle.None, BackColor = Theme.Surface2, ForeColor = Theme.Text, Dock = DockStyle.Fill, Font = Theme.UI(10f) };
+    field.Controls.Add(folderBox);
+    folder.Controls.Add(field, 0, 1);
+    var browse = new FlatButton(L.T("Escolher...", "Browse..."), ButtonKind.Secondary, 120, 38) { Margin = Padding.Empty };
+    browse.Click += (s, e) => {
       using (var d = new FolderBrowserDialog { Description = L.T("Onde instalar o jogo", "Where to install the game"), SelectedPath = folderBox.Text }) {
         if (d.ShowDialog(this) == DialogResult.OK) folderBox.Text = Path.Combine(d.SelectedPath, RepoName);
       }
     };
-    folderRow.Controls.AddRange(new Control[] { folderLabel, folderBox, folderButton });
-    folderRow.Tag = "folder";
-    flow.Controls.Add(folderRow);
+    folder.Controls.Add(browse, 1, 1);
+    folderRow = folder;
+    main.Controls.Add(folder);
 
-    var buttons = new FlowLayoutPanel { AutoSize = true, WrapContents = false };
-    MakeButton(playButton, L.T("JOGAR", "PLAY"), Accent);
-    playButton.Font = new Font("Segoe UI Semibold", 14f);
+    var buttons = Row(Theme.Surface, new Padding(0, 0, 0, 12));
+    playButton = new FlatButton(L.T("JOGAR", "PLAY"), ButtonKind.Primary, 210, 50) { Font = Theme.Semi(13f), Margin = new Padding(0, 0, 12, 0) };
     playButton.Click += (s, e) => Play();
-    MakeButton(installButton, L.T("INSTALAR", "INSTALL"), Color.FromArgb(60, 96, 160));
+    installButton = new FlatButton(L.T("INSTALAR", "INSTALL"), ButtonKind.Blue, 230, 50) { Font = Theme.Semi(11f), Margin = Padding.Empty };
     installButton.Click += (s, e) => Install();
     buttons.Controls.Add(playButton);
     buttons.Controls.Add(installButton);
-    flow.Controls.Add(buttons);
+    main.Controls.Add(buttons);
 
-    shortcutBox.Text = L.T("Criar atalho na área de trabalho", "Create a desktop shortcut");
-    shortcutBox.Checked = true; shortcutBox.AutoSize = true; shortcutBox.Margin = new Padding(3, 12, 3, 3);
-    flow.Controls.Add(shortcutBox);
+    shortcutBox = new ToggleSwitch { Checked = true, Width = 420, Margin = new Padding(0, 4, 0, 6) };
+    shortcutBox.OnText = shortcutBox.OffText = L.T("Criar atalho na área de trabalho", "Create a desktop shortcut");
+    main.Controls.Add(shortcutBox);
 
-    var links = new FlowLayoutPanel { AutoSize = true, WrapContents = false, Margin = new Padding(0, 18, 0, 0) };
-    links.Controls.Add(MakeLink(L.T("Abrir a pasta do jogo", "Open the game folder"), () => { if (root != null) Process.Start("explorer.exe", "\"" + root + "\""); }));
-    links.Controls.Add(MakeLink(L.T("Ver o log da instalação", "Show the install log"), () => tabs.SelectedTab = pageInstall));
-    links.Controls.Add(MakeLink(L.T("Configurações do PC", "PC settings"), () => tabs.SelectedTab = pageSettings));
-    flow.Controls.Add(links);
+    var more = AddCard(stack, out _);
+    more.Controls.Add(Words(L.T("ATALHOS", "SHORTCUTS"), Theme.Semi(9.5f), Theme.Text3, new Padding(0, 0, 0, 8)));
+    var links = Row(Theme.Surface, Padding.Empty);
+    links.Controls.Add(Ghost(L.T("Abrir a pasta do jogo", "Open the game folder"), () => { if (root != null) Process.Start("explorer.exe", "\"" + root + "\""); }));
+    links.Controls.Add(Ghost(L.T("Ver dependências", "See dependencies"), () => ShowPage(pageDeps)));
+    links.Controls.Add(Ghost(L.T("Log da instalação", "Install log"), () => ShowPage(pageInstall)));
+    links.Controls.Add(Ghost(L.T("Configurações do PC", "PC settings"), () => ShowPage(pageSettings)));
+    more.Controls.Add(links);
 
-    var note = new Label {
-      AutoSize = true, ForeColor = Muted, MaximumSize = new Size(800, 0), Margin = new Padding(3, 24, 3, 3),
-      Text = L.T("Seu jogo nunca é enviado para lugar nenhum: tudo é montado neste PC a partir do seu disco. " +
-                 "No jogo, F1 (ou Back+Start no controle) abre as mesmas configurações.",
-                 "Your game is never uploaded anywhere: everything is built on this PC from your disc. " +
-                 "In the game, F1 (or Back+Start on a controller) opens the same settings."),
-    };
-    flow.Controls.Add(note);
-    pagePlay.Controls.Add(flow);
+    stack.Controls.Add(Words(L.T("Seu jogo nunca é enviado para lugar nenhum: tudo é montado neste PC a partir do seu disco. " +
+                                "No jogo, F1 (ou Back+Start no controle) abre as mesmas configurações.",
+                                "Your game is never uploaded anywhere: everything is built on this PC from your disc. " +
+                                "In the game, F1 (or Back+Start on a controller) opens the same settings."),
+                           Theme.UI(9.5f), Theme.Text3, new Padding(4, 0, 4, 0)));
+    pagePlay.Controls.Add(Scroller(stack));
     folderBox.Text = DefaultInstallFolder();
   }
 
-  LinkLabel MakeLink(string text, Action action) {
-    var l = new LinkLabel { Text = text, AutoSize = true, LinkColor = Color.FromArgb(120, 170, 240), ActiveLinkColor = Text1, Margin = new Padding(3, 3, 24, 3) };
-    l.LinkClicked += (s, e) => action();
-    return l;
+  FlatButton Ghost(string text, Action action) {
+    var b = new FlatButton(text, ButtonKind.Secondary, TextRenderer.MeasureText(text, Theme.Semi(10f)).Width + 32, 36) { Font = Theme.Semi(10f), Margin = new Padding(0, 0, 10, 0) };
+    b.Click += (s, e) => action();
+    return b;
   }
 
   // The fixed drive with the most free space (the build needs several GB).
@@ -214,57 +262,60 @@ sealed partial class MainForm : Form {
 
   void RefreshStatus() {
     bool busy = Busy;
-    foreach (Control c in ((FlowLayoutPanel)pagePlay.Controls[0]).Controls)
-      if ((c.Tag as string) == "folder") c.Visible = root == null;
-    if (busy && running.StartInfo.FileName.EndsWith("powershell.exe", StringComparison.OrdinalIgnoreCase)) {
-      status.Text = L.T("Instalando...", "Installing..."); status.ForeColor = Text1;
+    folderRow.Visible = root == null;
+    if (SetupRunning) {
+      status.Text = L.T("Instalando...", "Installing..."); status.ForeColor = Theme.Text;
       statusDetail.Text = L.T("Acompanhe na aba Instalação. Pode demorar; deixe esta janela aberta.", "Follow it on the Install tab. It takes a while; keep this window open.");
     } else if (busy) {
-      status.Text = L.T("Em jogo", "Playing"); status.ForeColor = Accent;
+      status.Text = L.T("Em jogo", "Playing"); status.ForeColor = Theme.Accent;
       statusDetail.Text = L.T("O launcher volta quando o jogo fechar.", "The launcher comes back when the game closes.");
     } else if (root == null) {
-      status.Text = L.T("Não instalado", "Not installed"); status.ForeColor = Text1;
+      status.Text = L.T("Não instalado", "Not installed"); status.ForeColor = Theme.Text;
       statusDetail.Text = L.T(
-          $"O instalador baixa o kit do port (codigo-fonte, sem nada do jogo), instala as ferramentas de compilacao, pede o seu disco ({cfg.Disc}) e monta a versao para PC neste computador. " +
+          $"O instalador baixa o kit do port (código-fonte, sem nada do jogo), instala as ferramentas de compilação, pede o seu disco ({cfg.Disc}) e monta a versão para PC neste computador. " +
           $"Precisa de cerca de {cfg.DiskGb} GB livres e {cfg.Minutes} minutos.",
           $"The installer downloads the port kit (source code, nothing from the game), installs the build tools, asks for your disc ({cfg.Disc}) and builds the PC version on this computer. " +
           $"About {cfg.DiskGb} GB free and {cfg.Minutes} minutes are needed.");
     } else if (Installed) {
-      status.Text = L.T("Pronto para jogar", "Ready to play"); status.ForeColor = Accent;
+      status.Text = L.T("Pronto para jogar", "Ready to play"); status.ForeColor = Theme.Accent;
       statusDetail.Text = root;
     } else {
-      status.Text = L.T("Instalação incompleta", "Not built yet"); status.ForeColor = Text1;
+      status.Text = L.T("Instalação incompleta", "Not built yet"); status.ForeColor = Theme.Text;
       statusDetail.Text = L.T($"O kit está em {root}. Clique em INSTALAR para instalar as ferramentas, escolher o seu disco e montar o jogo (cerca de {cfg.Minutes} minutos).",
                               $"The kit is in {root}. Click INSTALL to get the build tools, choose your disc and build the game (about {cfg.Minutes} minutes).");
     }
     playButton.Enabled = Installed && !busy;
-    playButton.BackColor = playButton.Enabled ? Accent : Color.FromArgb(60, 64, 70);
     installButton.Enabled = !busy;
     installButton.Text = Installed ? L.T("REPARAR / ATUALIZAR", "REPAIR / UPDATE") : L.T("INSTALAR", "INSTALL");
+    installButton.Kind = Installed ? ButtonKind.Secondary : ButtonKind.Blue;
+    installButton.Invalidate();
     shortcutBox.Visible = !Installed;
-    cancelButton.Enabled = busy;
+    cancelButton.Enabled = SetupRunning;
     UpdateDepButtons();
-    if (!busy && deps.Count > 0 && tabs.SelectedTab == pageDeps) CheckDeps();
+    if (!busy && deps.Count > 0 && current == pageDeps) CheckDeps();
   }
 
   // ------------------------------------------------------------------ Install page
 
   void BuildInstallPage() {
-    stepLabel.Dock = DockStyle.Top; stepLabel.Height = 30; stepLabel.Font = new Font("Segoe UI Semibold", 11f);
-    stepLabel.Text = L.T("Nada em andamento.", "Nothing running.");
-    progress.Dock = DockStyle.Top; progress.Height = 8; progress.Style = ProgressBarStyle.Continuous; progress.Maximum = 5;
-    log.Dock = DockStyle.Fill; log.Multiline = true; log.ReadOnly = true; log.ScrollBars = ScrollBars.Vertical;
-    log.BackColor = Color.FromArgb(14, 15, 18); log.ForeColor = Color.FromArgb(200, 204, 210); log.BorderStyle = BorderStyle.None;
-    log.Font = new Font("Consolas", 9.5f);
-    var bottom = new FlowLayoutPanel { Dock = DockStyle.Bottom, Height = 52, FlowDirection = FlowDirection.RightToLeft, Padding = new Padding(0, 8, 0, 0) };
-    MakeButton(cancelButton, L.T("Parar", "Stop"), Danger, 120, 36);
+    var top = Stack(Theme.Bg);
+    var card = AddCard(top, out _);
+    stepLabel = Words(L.T("Nada em andamento.", "Nothing running."), Theme.Semi(11.5f), Theme.Text, new Padding(0, 0, 0, 10));
+    progress = new ProgressLine { Anchor = AnchorStyles.Left | AnchorStyles.Right, Height = 6, Maximum = 5, Margin = Padding.Empty };
+    card.Controls.Add(stepLabel);
+    card.Controls.Add(progress);
+
+    var logCard = new Card { Dock = DockStyle.Fill, Padding = new Padding(14, 12, 6, 12) };
+    log = new TextBox { Dock = DockStyle.Fill, Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Vertical, BorderStyle = BorderStyle.None,
+                        BackColor = Theme.Surface, ForeColor = Theme.Text2, Font = new Font("Consolas", 9.5f) };
+    Theme.DarkScroll(log);
+    logCard.Controls.Add(log);
+    var bottom = new FlowLayoutPanel { Dock = DockStyle.Bottom, Height = 56, FlowDirection = FlowDirection.RightToLeft, Padding = new Padding(0, 14, 0, 0), BackColor = Theme.Bg };
+    cancelButton = new FlatButton(L.T("Parar", "Stop"), ButtonKind.Danger, 130, 38) { Margin = Padding.Empty };
     cancelButton.Click += (s, e) => StopInstall();
     bottom.Controls.Add(cancelButton);
-    var spacer = new Panel { Dock = DockStyle.Top, Height = 10 };
-    pageInstall.Controls.Add(log);
-    pageInstall.Controls.Add(spacer);
-    pageInstall.Controls.Add(progress);
-    pageInstall.Controls.Add(stepLabel);
+    pageInstall.Controls.Add(logCard);
+    pageInstall.Controls.Add(top);
     pageInstall.Controls.Add(bottom);
   }
 
@@ -275,8 +326,8 @@ sealed partial class MainForm : Form {
     var m = Regex.Match(line, @"^== (\d)/(\d) (.*)$");
     if (m.Success) {
       progress.Maximum = int.Parse(m.Groups[2].Value);
-      progress.Value = Math.Min(progress.Maximum, int.Parse(m.Groups[1].Value) - 1);
-      stepLabel.Text = m.Groups[1].Value + "/" + m.Groups[2].Value + "  " + m.Groups[3].Value;
+      progress.Value = int.Parse(m.Groups[1].Value) - 1;
+      stepLabel.Text = m.Groups[1].Value + "/" + m.Groups[2].Value + "   " + m.Groups[3].Value;
     }
   }
 
@@ -286,36 +337,34 @@ sealed partial class MainForm : Form {
     if (target == null) {
       target = folderBox.Text.Trim();
       if (target.Length == 0 || !Path.IsPathRooted(target)) {
-        MessageBox.Show(this, L.T("Escolha uma pasta de instalação.", "Choose an install folder."), Text); return;
+        Dialog.Info(this, Text, L.T("Escolha uma pasta de instalação.", "Choose an install folder.")); return;
       }
     }
     string msg = L.T(
         "O instalador vai:\n\n" +
-        (root == null ? "- baixar o kit do port do GitHub (só código-fonte, cerca de 1 MB)\n" : "") +
-        "- instalar o Python e o Microsoft C++ Build Tools se faltarem (o Build Tools tem cerca de 7 GB e pede permissão de administrador)\n" +
-        "- baixar as ferramentas de compilação para dentro da pasta do jogo\n" +
-        $"- pedir o seu disco ({cfg.Disc}) ou a imagem .iso\n" +
-        $"- montar a versão para PC (cerca de {cfg.Minutes} minutos)\n\n" +
-        $"Pasta: {target}\n\nContinuar?",
+        (root == null ? "•  baixar o kit do port do GitHub (só código-fonte, cerca de 1 MB)\n" : "") +
+        "•  instalar o Python e o Microsoft C++ Build Tools se faltarem (o Build Tools tem cerca de 7 GB e pede permissão de administrador)\n" +
+        "•  baixar as ferramentas de compilação para dentro da pasta do jogo\n" +
+        $"•  pedir o seu disco ({cfg.Disc}) ou a imagem .iso\n" +
+        $"•  montar a versão para PC (cerca de {cfg.Minutes} minutos)\n\n" +
+        $"Pasta: {target}",
         "The installer will:\n\n" +
-        (root == null ? "- download the port kit from GitHub (source code only, about 1 MB)\n" : "") +
-        "- install Python and the Microsoft C++ Build Tools if missing (the Build Tools are about 7 GB and ask for administrator permission)\n" +
-        "- download the build tools into the game folder\n" +
-        $"- ask for your disc ({cfg.Disc}) or its .iso image\n" +
-        $"- build the PC version (about {cfg.Minutes} minutes)\n\n" +
-        $"Folder: {target}\n\nContinue?");
-    if (MessageBox.Show(this, msg, Text, MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes) return;
+        (root == null ? "•  download the port kit from GitHub (source code only, about 1 MB)\n" : "") +
+        "•  install Python and the Microsoft C++ Build Tools if missing (the Build Tools are about 7 GB and ask for administrator permission)\n" +
+        "•  download the build tools into the game folder\n" +
+        $"•  ask for your disc ({cfg.Disc}) or its .iso image\n" +
+        $"•  build the PC version (about {cfg.Minutes} minutes)\n\n" +
+        $"Folder: {target}");
+    if (!Dialog.Ask(this, Text, msg, L.T("Instalar", "Install"), L.T("Cancelar", "Cancel"))) return;
 
-    tabs.SelectedTab = pageInstall;
+    ShowPage(pageInstall);
     log.Clear();
     progress.Value = 0;
     installButton.Enabled = false;
     try {
       if (root == null) {
         stepLabel.Text = L.T("Baixando o kit do port...", "Downloading the port kit...");
-        string kit = await Task.Run(() => KitDownload.Fetch(cfg, target, AppendLog));
-        root = kit;
-        Text = cfg.Game + " - PC";
+        root = await Task.Run(() => KitDownload.Fetch(cfg, target, AppendLog));
       }
     } catch (Exception ex) {
       AppendLog(ex.Message);
@@ -355,7 +404,7 @@ sealed partial class MainForm : Form {
     running = null;
     if (only != null) {
       stepLabel.Text = code == 0 ? L.T("Pronto.", "Done.") : L.T("Parou com erro. Veja o log abaixo (também em setup-log.txt).", "Stopped with an error. See the log below (also in setup-log.txt).");
-      tabs.SelectedTab = pageDeps;
+      if (code == 0) ShowPage(pageDeps);
       RefreshStatus();
       return;
     }
@@ -363,7 +412,7 @@ sealed partial class MainForm : Form {
       progress.Value = progress.Maximum;
       stepLabel.Text = L.T("Pronto! O jogo está instalado.", "Done! The game is installed.");
       if (shortcutBox.Checked) CreateShortcut();
-      tabs.SelectedTab = pagePlay;
+      ShowPage(pagePlay);
     } else {
       stepLabel.Text = L.T("A instalação parou. Veja o log abaixo (também em setup-log.txt) e clique em INSTALAR de novo: as etapas prontas são puladas.",
                            "Setup stopped. See the log below (also in setup-log.txt) and click INSTALL again: finished steps are skipped.");
@@ -373,8 +422,8 @@ sealed partial class MainForm : Form {
 
   void StopInstall() {
     if (!Busy) return;
-    if (MessageBox.Show(this, L.T("Parar agora? Dá para continuar depois: as etapas prontas são puladas.", "Stop now? You can continue later: finished steps are skipped."),
-                        Text, MessageBoxButtons.YesNo) != DialogResult.Yes) return;
+    if (!Dialog.Ask(this, Text, L.T("Parar agora? Dá para continuar depois: as etapas prontas são puladas.", "Stop now? You can continue later: finished steps are skipped."),
+                    L.T("Parar", "Stop"), L.T("Continuar", "Keep going"), true)) return;
     KillTree(running.Id);
   }
 
@@ -402,9 +451,9 @@ sealed partial class MainForm : Form {
 
   void OnClosing(object sender, FormClosingEventArgs e) {
     if (dirty && root != null) SaveSettings();
-    if (Busy && running.StartInfo.FileName.EndsWith("powershell.exe", StringComparison.OrdinalIgnoreCase)) {
-      if (MessageBox.Show(this, L.T("A instalação ainda está rodando. Parar e fechar?", "Setup is still running. Stop it and close?"),
-                          Text, MessageBoxButtons.YesNo) != DialogResult.Yes) { e.Cancel = true; return; }
+    if (SetupRunning) {
+      if (!Dialog.Ask(this, Text, L.T("A instalação ainda está rodando. Parar e fechar?", "Setup is still running. Stop it and close?"),
+                      L.T("Parar e fechar", "Stop and close"), L.T("Voltar", "Back"), true)) { e.Cancel = true; Restart = false; return; }
       KillTree(running.Id);
     }
   }
@@ -430,10 +479,9 @@ sealed partial class MainForm : Form {
       Activate();
       if (p.ExitCode != 0) {
         string text;
-        lock (output) text = output.ToString();
-        if (text.Length > 3000) text = "..." + text.Substring(text.Length - 3000);
-        MessageBox.Show(this, L.T("O jogo fechou com erro (código ", "The game closed with an error (code ") + p.ExitCode + ").\n\n" + text,
-                        Text, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        lock (output) text = output.ToString().Trim();
+        if (text.Length > 2000) text = "..." + text.Substring(text.Length - 2000);
+        Dialog.Info(this, Text, L.T("O jogo fechou com erro (código ", "The game closed with an error (code ") + p.ExitCode + ").\n\n" + text);
       }
       RefreshStatus();
     }));
@@ -447,124 +495,132 @@ sealed partial class MainForm : Form {
 
   // ------------------------------------------------------------------ PC settings page
 
+  static readonly HashSet<string> OffWords = new HashSet<string> { "Desligada", "Desligado", "Não", "Esconder", "Off", "No", "Hide" };
+
   void BuildSettingsPage() {
-    help.Dock = DockStyle.Bottom; help.Height = 64; help.ForeColor = Muted; help.Padding = new Padding(4, 10, 4, 0);
-    var bottom = new FlowLayoutPanel { Dock = DockStyle.Bottom, Height = 52, FlowDirection = FlowDirection.RightToLeft, Padding = new Padding(0, 8, 0, 0) };
-    MakeButton(saveButton, L.T("Salvar", "Save"), Accent, 140, 36);
-    saveButton.Click += (s, e) => SaveSettings();
-    MakeButton(defaultsButton, L.T("Restaurar padrões", "Restore defaults"), Panel2, 180, 36);
-    defaultsButton.Click += (s, e) => { foreach (var kv in editors) SetEditor(kv.Key, kv.Key.Default); dirty = true; };
-    bottom.Controls.Add(saveButton);
-    bottom.Controls.Add(defaultsButton);
-    settingsNote.Dock = DockStyle.Top; settingsNote.Height = 40; settingsNote.ForeColor = Muted;
-    var scroller = new Panel { Dock = DockStyle.Fill, AutoScroll = true };
-    settingsTable.AutoSize = true; settingsTable.ColumnCount = 2; settingsTable.Dock = DockStyle.Top;
-    settingsTable.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 300));
-    settingsTable.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 440));
-    scroller.Controls.Add(settingsTable);
-    pageSettings.Controls.Add(scroller);
-    pageSettings.Controls.Add(settingsNote);
-    pageSettings.Controls.Add(help);
-    pageSettings.Controls.Add(bottom);
+    var stack = Stack(Theme.Bg);
+    settingsNote = Words("", Theme.UI(9.5f), Theme.Text3, new Padding(4, 0, 4, 14));
+    stack.Controls.Add(settingsNote);
 
     var monitors = Displays.Monitors();
     var gpus = Gpus.List();
     foreach (var g in cfg.Groups) {
-      var head = new Label { Text = L.T(g).ToUpperInvariant(), Font = new Font("Segoe UI Semibold", 10.5f), ForeColor = Accent, AutoSize = true, Margin = new Padding(3, 16, 3, 6) };
-      settingsTable.Controls.Add(head);
-      settingsTable.SetColumnSpan(head, 2);
+      var card = AddCard(stack, out _);
+      card.Controls.Add(Words(L.T(g).ToUpperInvariant(), Theme.Semi(9.5f), Theme.Accent, new Padding(0, 0, 0, 4)));
+      bool first = true;
       foreach (var s in g.Items) {
-        var label = new Label { Text = L.T(s) + (s.Restart ? "" : ""), AutoSize = true, Margin = new Padding(3, 9, 3, 3) };
+        var row = new TableLayoutPanel { ColumnCount = 2, AutoSize = true, Anchor = AnchorStyles.Left | AnchorStyles.Right, BackColor = Theme.Surface, Margin = Padding.Empty, Padding = new Padding(0, 12, 0, 12) };
+        row.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        row.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 380));
+        var left = Stack(Theme.Surface);
+        left.Dock = DockStyle.None; left.Anchor = AnchorStyles.Left | AnchorStyles.Right;
+        left.Margin = new Padding(0, 0, 24, 0);
+        left.Controls.Add(Words(L.T(s), Theme.Semi(10.5f), Theme.Text, new Padding(0, 0, 0, 2)));
+        string help = (L.Pt ? s.HelpPt : s.HelpEn) + (s.Restart ? L.T(" Vale na próxima vez que o jogo abrir.", " Applies the next time the game starts.") : "");
+        if (help.Trim().Length > 0) left.Controls.Add(Words(help.Trim(), Theme.UI(9f), Theme.Text3, Padding.Empty));
+        row.Controls.Add(left, 0, 0);
+
         Control editor;
         if (s.Max > s.Min) {
-          var bar = new TrackBar { Minimum = s.Min, Maximum = s.Max, SmallChange = s.Step, LargeChange = s.Step * 2, TickFrequency = s.Step * 2, Width = 300, BackColor = Back };
-          var value = new Label { AutoSize = true, Margin = new Padding(6, 9, 3, 3) };
-          bar.ValueChanged += (o, e) => { value.Text = bar.Value + "%"; dirty = true; };
-          var row = new FlowLayoutPanel { AutoSize = true, WrapContents = false, Margin = Padding.Empty };
-          row.Controls.Add(bar); row.Controls.Add(value);
-          row.Tag = bar;
-          editor = row;
-          bar.Enter += (o, e) => ShowHelp(s);
-          bar.MouseEnter += (o, e) => ShowHelp(s);
+          var slider = new Slider { Width = 360, Anchor = AnchorStyles.Right };
+          slider.Range(s.Min, s.Max, s.Step);
+          slider.ValueChanged += (o, e) => Changed();
+          editor = slider;
+        } else if (s.Source == null && s.Choices.Count == 2 && s.Choices.Any(c => c.Value == 0 && OffWords.Contains(c.Pt)) && s.Choices.Any(c => c.Value == 1)) {
+          var toggle = new ToggleSwitch { Width = 360, Anchor = AnchorStyles.Right };
+          toggle.OnText = L.T(s.Choices.First(c => c.Value == 1));
+          toggle.OffText = L.T(s.Choices.First(c => c.Value == 0));
+          toggle.CheckedChanged += (o, e) => Changed();
+          editor = toggle;
         } else {
-          var combo = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 420, FlatStyle = FlatStyle.Flat, BackColor = Panel2, ForeColor = Text1, Margin = new Padding(3, 5, 3, 3) };
-          combo.DisplayMember = "Text";
-          FillChoices(s, combo, monitors, gpus);
-          combo.SelectedIndexChanged += (o, e) => { dirty = true; if (combo == monitorCombo) RefillRefresh(); };
-          combo.Enter += (o, e) => ShowHelp(s);
-          combo.MouseEnter += (o, e) => ShowHelp(s);
-          editor = combo;
+          var box = new ChoiceBox { Width = 360, Anchor = AnchorStyles.Right };
+          FillChoices(s, box, monitors, gpus);
+          box.SelectedIndexChanged += (o, e) => { if (box == monitorCombo) RefillRefresh(); Changed(); };
+          editor = box;
         }
-        label.MouseEnter += (o, e) => ShowHelp(s);
+        editor.Margin = Padding.Empty;
+        row.Controls.Add(editor, 1, 0);
+        if (!first) card.Controls.Add(new Panel { Height = 1, BackColor = Theme.Border, Anchor = AnchorStyles.Left | AnchorStyles.Right, Margin = Padding.Empty });
+        first = false;
+        card.Controls.Add(row);
         editors[s] = editor;
-        labels[s] = label;
-        settingsTable.Controls.Add(label);
-        settingsTable.Controls.Add(editor);
+        rows[s] = row;
       }
     }
+
+    var bottom = new TableLayoutPanel { Dock = DockStyle.Bottom, Height = 58, ColumnCount = 3, BackColor = Theme.Bg, Padding = new Padding(0, 14, 0, 0) };
+    bottom.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+    bottom.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+    bottom.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+    saveState = new Label { AutoSize = true, ForeColor = Theme.Text3, Anchor = AnchorStyles.Left, Margin = new Padding(4, 10, 0, 0) };
+    defaultsButton = new FlatButton(L.T("Restaurar padrões", "Restore defaults"), ButtonKind.Secondary, 190, 40) { Margin = new Padding(0, 0, 10, 0) };
+    defaultsButton.Click += (s, e) => { foreach (var kv in editors) SetEditor(kv.Key, kv.Key.Default); Changed(); };
+    saveButton = new FlatButton(L.T("Salvar", "Save"), ButtonKind.Primary, 150, 40) { Margin = Padding.Empty };
+    saveButton.Click += (s, e) => SaveSettings();
+    bottom.Controls.Add(saveState, 0, 0);
+    bottom.Controls.Add(defaultsButton, 1, 0);
+    bottom.Controls.Add(saveButton, 2, 0);
+    pageSettings.Controls.Add(Scroller(stack));
+    pageSettings.Controls.Add(bottom);
   }
 
-  sealed class Item {
-    public int Value; public string Text;
-    public override string ToString() => Text;
+  void Changed() {
+    if (loading) return;
+    dirty = true;
+    saveState.Text = L.T("Alterações não salvas", "Unsaved changes");
+    saveState.ForeColor = Theme.Text2;
   }
 
-  void FillChoices(Setting s, ComboBox combo, List<MonitorInfo> monitors, List<KeyValuePair<int, string>> gpus) {
-    combo.Items.Clear();
+  void FillChoices(Setting s, ChoiceBox box, List<MonitorInfo> monitors, List<KeyValuePair<int, string>> gpus) {
+    box.Items.Clear();
     switch (s.Source) {
       case "monitors":
-        monitorCombo = combo;
+        monitorCombo = box;
         for (int i = 0; i < Math.Max(1, monitors.Count); ++i)
-          combo.Items.Add(new Item { Value = i, Text = (i + 1) + ": " + (i < monitors.Count ? monitors[i].Name : "?") });
-        combo.Tag = monitors;
+          box.Items.Add(new ChoiceBox.Entry { Value = i, Text = (i + 1) + ": " + (i < monitors.Count ? monitors[i].Name : "?") });
+        box.Tag = monitors;
         return;
       case "refresh":
-        refreshCombo = combo;
+        refreshCombo = box;
         RefillRefresh();
         return;
       case "gpus":
-        combo.Items.Add(new Item { Value = -1, Text = L.T("Automática (padrão do Windows)", "Automatic (Windows default)") });
-        foreach (var g in gpus) combo.Items.Add(new Item { Value = g.Key, Text = g.Value });
+        box.Items.Add(new ChoiceBox.Entry { Value = -1, Text = L.T("Automática (padrão do Windows)", "Automatic (Windows default)") });
+        foreach (var g in gpus) box.Items.Add(new ChoiceBox.Entry { Value = g.Key, Text = g.Value });
         return;
     }
-    foreach (var c in s.Choices) combo.Items.Add(new Item { Value = c.Value, Text = L.T(c) });
+    foreach (var c in s.Choices) box.Items.Add(new ChoiceBox.Entry { Value = c.Value, Text = L.T(c) });
   }
 
   void RefillRefresh() {
     if (refreshCombo == null) return;
     var monitors = monitorCombo?.Tag as List<MonitorInfo>;
-    int index = monitorCombo != null && monitorCombo.SelectedItem is Item m ? m.Value : 0;
+    int index = monitorCombo?.Selected?.Value ?? 0;
     string device = monitors != null && index < monitors.Count ? monitors[index].Device : null;
-    int keep = refreshCombo.SelectedItem is Item r ? r.Value : 0, current = 60;
+    int keep = refreshCombo.Selected?.Value ?? 0, current = 60;
     var rates = device != null ? Displays.RefreshRates(device, out current) : new List<int>();
     refreshCombo.Items.Clear();
-    refreshCombo.Items.Add(new Item { Value = 0, Text = L.T($"A do monitor ({current} Hz)", $"Monitor refresh rate ({current} Hz)") });
-    foreach (int hz in rates) refreshCombo.Items.Add(new Item { Value = hz, Text = hz + " Hz" });
-    SelectValue(refreshCombo, keep, 0);
-  }
-
-  static void SelectValue(ComboBox combo, int value, int fallback) {
-    int pick = -1;
-    for (int i = 0; i < combo.Items.Count; ++i) if (((Item)combo.Items[i]).Value == value) pick = i;
-    if (pick < 0) for (int i = 0; i < combo.Items.Count; ++i) if (((Item)combo.Items[i]).Value == fallback) pick = i;
-    combo.SelectedIndex = pick >= 0 ? pick : (combo.Items.Count > 0 ? 0 : -1);
+    refreshCombo.Items.Add(new ChoiceBox.Entry { Value = 0, Text = L.T($"A do monitor ({current} Hz)", $"Monitor refresh rate ({current} Hz)") });
+    foreach (int hz in rates) refreshCombo.Items.Add(new ChoiceBox.Entry { Value = hz, Text = hz + " Hz" });
+    refreshCombo.Select(keep, 0);
+    refreshCombo.Invalidate();
   }
 
   void SetEditor(Setting s, int value) {
-    var editor = editors[s];
-    if (editor is ComboBox combo) SelectValue(combo, value, s.Default);
-    else if (editor.Tag is TrackBar bar) bar.Value = Math.Max(bar.Minimum, Math.Min(bar.Maximum, value));
+    switch (editors[s]) {
+      case ChoiceBox box: box.Select(value, s.Default); break;
+      case ToggleSwitch t: t.Checked = value != 0; break;
+      case Slider sl: sl.Value = value; break;
+    }
   }
 
   int GetEditor(Setting s) {
-    var editor = editors[s];
-    if (editor is ComboBox combo) return combo.SelectedItem is Item i ? i.Value : s.Default;
-    return editor.Tag is TrackBar bar ? bar.Value : s.Default;
-  }
-
-  void ShowHelp(Setting s) {
-    help.Text = (L.Pt ? s.HelpPt : s.HelpEn) +
-                (s.Restart ? L.T("  (Vale na próxima vez que o jogo abrir.)", "  (Applies the next time the game starts.)") : "");
+    switch (editors[s]) {
+      case ChoiceBox box: return box.Selected?.Value ?? s.Default;
+      case ToggleSwitch t: return t.Checked ? 1 : 0;
+      case Slider sl: return sl.Value;
+    }
+    return s.Default;
   }
 
   bool SettingVisible(Setting s) =>
@@ -574,20 +630,19 @@ sealed partial class MainForm : Form {
     string ini = IniPath;
     bool ready = ini != null && Directory.Exists(Path.GetDirectoryName(ini));
     settingsNote.Text = ready
-        ? L.T("Estas são as mesmas opções do menu F1 do jogo. São salvas em ", "These are the same options as the game's F1 menu. Saved in ") + Path.GetFileName(ini) + "."
-        : L.T("Instale o jogo primeiro: as configurações ficam ao lado dele.", "Install the game first: the settings are kept next to it.");
-    settingsTable.Enabled = ready; saveButton.Enabled = ready; defaultsButton.Enabled = ready;
-    settingsTable.SuspendLayout();
-    foreach (var kv in editors) {
-      bool visible = SettingVisible(kv.Key);
-      kv.Value.Visible = visible;
-      labels[kv.Key].Visible = visible;
-    }
+        ? L.T("As mesmas opções do menu F1 do jogo, salvas em ", "The same options as the game's F1 menu, saved in ") + Path.GetFileName(ini) +
+          L.T(". O jogo usa estas opções quando abrir.", ". The game uses them when it starts.")
+        : L.T("Dá para conferir as opções agora; para salvar, instale o jogo primeiro (as configurações ficam ao lado dele).",
+              "You can look at the options now; to save them, install the game first (the settings are kept next to it).");
+    saveButton.Enabled = ready; defaultsButton.Enabled = ready;
+    loading = true;
+    foreach (var kv in rows) kv.Value.Visible = SettingVisible(kv.Key);
     // Monitor first: the refresh list depends on it.
     foreach (var s in editors.Keys.OrderBy(k => k.Source == "monitors" ? 0 : 1))
       SetEditor(s, ready ? Ini.Get(ini, cfg.Section, s.Key, s.Default) : s.Default);
-    settingsTable.ResumeLayout();
+    loading = false;
     dirty = false;
+    saveState.Text = "";
   }
 
   void SaveSettings() {
@@ -595,7 +650,28 @@ sealed partial class MainForm : Form {
     if (ini == null || !Directory.Exists(Path.GetDirectoryName(ini))) return;
     foreach (var s in editors.Keys) if (SettingVisible(s)) Ini.Put(ini, cfg.Section, s.Key, GetEditor(s));
     dirty = false;
-    help.Text = L.T("Salvo. O jogo usa estas opções na próxima vez que abrir.", "Saved. The game uses these options the next time it starts.");
+    saveState.Text = L.T("Salvo. O jogo usa estas opções na próxima vez que abrir.", "Saved. The game uses these options the next time it starts.");
+    saveState.ForeColor = Theme.Accent;
+  }
+}
+
+// A page tab in the header: text with an accent bar under the selected one.
+sealed class NavTab : Control {
+  bool selected, hover;
+  public NavTab(string text) {
+    SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
+    Text = text; Font = Theme.Semi(10.5f); Cursor = Cursors.Hand;
+    Size = new Size(TextRenderer.MeasureText(text, Font).Width + 36, 44);
+    Margin = Padding.Empty;
+  }
+  public bool Selected { get => selected; set { selected = value; Invalidate(); } }
+  protected override void OnMouseEnter(EventArgs e) { hover = true; Invalidate(); base.OnMouseEnter(e); }
+  protected override void OnMouseLeave(EventArgs e) { hover = false; Invalidate(); base.OnMouseLeave(e); }
+  protected override void OnPaint(PaintEventArgs e) {
+    var g = e.Graphics;
+    g.Clear(Theme.Surface);
+    Theme.DrawCentered(g, Text, Font, selected ? Theme.Text : hover ? Theme.Text2 : Theme.Text3, new Rectangle(0, 0, Width, Height - 4));
+    if (selected) using (var b = new SolidBrush(Theme.Accent)) g.FillRectangle(b, 14, Height - 3, Width - 28, 3);
   }
 }
 
