@@ -1,5 +1,13 @@
 Source kit only: no game, no XEX, no generated code and no executable. Bring your own Xbox 360 USA disc.
 
+**v0.2.3**
+
+- **Controller vibration** on/off in the F1 PC settings.
+- The game-data installer launcher is now `Install-Files.cmd` (English name).
+- The shared game-data installer (`tools/port-installer`) ships in the repository.
+
+Vibration has been compiled but not felt on a real controller yet. Nobody has played this exact build through.
+
 **v0.2.2**
 
 - Measured in a match at 4K, 8x MSAA, 16x anisotropic filtering, no frame limit: about 148 fps, minimum 120 (Ryzen 5 3600, RTX 3050 Laptop).
