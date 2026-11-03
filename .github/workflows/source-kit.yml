@@ -27,7 +27,7 @@ jobs:
 
   release:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: audit
+    needs: [audit, launcher]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -40,11 +40,15 @@ jobs:
         with:
           python-version: '3.12'
       - run: python tools/audit_publication.py --zip dist/fifa-street-3-pc-source-kit.zip
+      - uses: actions/download-artifact@v4
+        with:
+          name: Setup
+          path: dist
       - name: Publish source-only Release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$GITHUB_REF_NAME" dist/fifa-street-3-pc-source-kit.zip \
+          gh release create "$GITHUB_REF_NAME" dist/fifa-street-3-pc-source-kit.zip dist/Setup.exe \
             --repo "$GITHUB_REPOSITORY" \
             --title "FIFA Street 3 PC — $GITHUB_REF_NAME source kit" \
             --notes-file RELEASE-NOTES.md
@@ -56,9 +60,9 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-      - name: Build FIFA-Street-3-PC.exe
-        run: dotnet build tools/launcher/Launcher.csproj -c Release -p:GameConfig=../../launcher.json -p:AssemblyName=FIFA-Street-3-PC -o dist
+      - name: Build Setup.exe
+        run: dotnet build tools/launcher/Launcher.csproj -c Release -p:GameConfig=../../launcher.json -p:AssemblyName=Setup -o dist
       - uses: actions/upload-artifact@v4
         with:
-          name: FIFA-Street-3-PC
-          path: dist/FIFA-Street-3-PC.exe
+          name: Setup
+          path: dist/Setup.exe
