@@ -40,3 +40,14 @@ game-install-report.json
 !/tools/port-installer
 !/.github/
 !/.github/workflows/
+
+# Setup.cmd output
+setup-log.txt
+
+# One-click setup (Setup.cmd): shared scripts, this game's steps, and its log
+!/setup.json
+!/requirements.txt
+!/tools/
+!/tools/setup.ps1
+!/tools/setup_tools.py
+setup-log.txt
