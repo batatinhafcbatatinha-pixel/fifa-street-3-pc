@@ -12,14 +12,17 @@ namespace PortLauncher {
 
 static class KitDownload {
   public static string Fetch(GameConfig cfg, string target, Action<string> log) {
-    if (string.IsNullOrEmpty(cfg.Repo) || string.IsNullOrEmpty(cfg.KitAsset))
-      throw new InvalidOperationException("launcher.json has no repo/kit_asset.");
+    if (string.IsNullOrEmpty(cfg.Repo))
+      throw new InvalidOperationException("launcher.json has no repo.");
     target = Path.GetFullPath(target);
     if (Directory.Exists(target) && Directory.EnumerateFileSystemEntries(target).Any() &&
         !File.Exists(Path.Combine(target, "setup.json")))
       throw new IOException(L.T("A pasta escolhida não está vazia: ", "The chosen folder is not empty: ") + target);
-    string url = $"https://github.com/{cfg.Repo}/releases/latest/download/{cfg.KitAsset}";
-    string zip = Path.Combine(Path.GetTempPath(), cfg.KitAsset);
+    // The release's source-kit ZIP, or (repositories without one) GitHub's source ZIP of the latest release tag.
+    string url = string.IsNullOrEmpty(cfg.KitAsset)
+        ? $"https://github.com/{cfg.Repo}/archive/refs/tags/{LatestTag(cfg.Repo)}.zip"
+        : $"https://github.com/{cfg.Repo}/releases/latest/download/{cfg.KitAsset}";
+    string zip = Path.Combine(Path.GetTempPath(), cfg.Repo.Replace('/', '-') + "-kit.zip");
     log(L.T("Baixando ", "Downloading ") + url);
     using (var web = new WebClient()) {
       web.Headers[HttpRequestHeader.UserAgent] = "port-launcher";
@@ -48,6 +51,19 @@ static class KitDownload {
     if (!string.Equals(Path.GetFullPath(self), copy, StringComparison.OrdinalIgnoreCase)) File.Copy(self, copy, true);
     log("OK");
     return target;
+  }
+
+  // releases/latest redirects to .../releases/tag/<tag>.
+  static string LatestTag(string repo) {
+    var request = (HttpWebRequest)WebRequest.Create($"https://github.com/{repo}/releases/latest");
+    request.AllowAutoRedirect = false;
+    request.UserAgent = "port-launcher";
+    using (var response = (HttpWebResponse)request.GetResponse()) {
+      string location = response.Headers["Location"] ?? "";
+      int at = location.LastIndexOf("/tag/", StringComparison.Ordinal);
+      if (at < 0) throw new IOException("No release found for " + repo);
+      return location.Substring(at + 5);
+    }
   }
 }
 
